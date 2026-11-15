@@ -175,3 +175,36 @@ def test_export_yolo_endpoint_blocks_unknown_coord_space(client, sample_jpeg_byt
     err = resp.json()
     assert err["detail"]["error"] == "validation_failed"
     assert "coordinateSpace is unverified" in err["detail"]["message"]
+
+
+def test_endpoint_url_normalization():
+    """Verify endpoint URL normalization handles bare hostnames, trailing slashes, and paths."""
+    from src.config import normalize_inference_url, DEFAULT_INFERENCE_API_URL
+
+    # Bare domain without path -> appends /predict
+    url1 = "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app"
+    assert normalize_inference_url(url1) == "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict"
+
+    # Trailing slash -> appends /predict cleanly
+    url2 = "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/"
+    assert normalize_inference_url(url2) == "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict"
+
+    # Already has /predict -> preserved
+    url3 = "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict"
+    assert normalize_inference_url(url3) == "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict"
+
+    # None or empty string -> returns DEFAULT_INFERENCE_API_URL
+    assert normalize_inference_url(None) == DEFAULT_INFERENCE_API_URL
+    assert normalize_inference_url("") == DEFAULT_INFERENCE_API_URL
+    assert normalize_inference_url("   ") == DEFAULT_INFERENCE_API_URL
+
+
+def test_health_reports_updated_endpoint(client):
+    """Verify health endpoint dynamically reflects normalized live endpoint without secret leakage."""
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app" in data["upstreamEndpoint"]
+    assert "Authorization" not in resp.headers
+    assert "key" not in data or data.get("key") is None
+

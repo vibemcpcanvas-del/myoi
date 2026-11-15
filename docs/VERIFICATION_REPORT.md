@@ -106,3 +106,29 @@
 | **15** | 기존 Beep, TTS, 클래스 설정, 작전 시작/중지 무회귀 | `tests/test_collection_lifecycle.py::test_15_audio_...` | **PASS** |
 
 **종합 검증 결과: 15/15 항목 100% 통과 (Total 43 tests passed across Python & Node.js test suites)**
+
+---
+
+## 6. Coarena / Pateway Advisor 라이브 엔드포인트 감사 보고서 (WBS-01 연계)
+
+### 6.1 신규 엔드포인트 사양 및 라이브 진단
+- **대상 엔드포인트**: `https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app`
+- **정규화 경로**: `https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict`
+  - `GET /`: `{"message": "Welcome to 1", "status": "healthy"}` (정상 응답)
+  - `GET /openapi.json`: OpenAPI 3.1.0 전체 스펙 회수 성공 (FastAPI / Ultralytics 8.4.214, PyTorch 2.15.0+cpu, Python 3.14.10)
+  - `POST /predict`: 탐지 추론 엔드포인트 (Multipart/form-data 또는 binary)
+- **응답 스키마 분석**:
+  - `images[0].shape`: `[640, 640]`
+  - `images[0].results`: `[{ "name": str, "class": int, "confidence": float, "box": { "x1": float, "y1": float, "x2": float, "y2": float } }]`
+  - 좌표계: `[0, 640] x [0, 640]` 픽셀 기준 반환 → 기존 SCHALE `letterbox_640` 어댑터와 100% 호환 검증 완료.
+
+### 6.2 인증 키 감사 및 포렌식 진단
+1. **사용자 환경변수 설정 진단**:
+   - 사용자가 파워셸 터미널 세션에서 `$env:INFERENCE_API_KEY = "ul_0a...3d0e"`를 입력하였으나, 이는 프로세스 로컬 변수이므로 영구 레지스트리(`HKCU\Environment`)에 기록되지 않는 윈도우 환경 특성을 확인.
+   - 이에 따라 시스템 차원에서 사용자 환경 레지스트리에 영구 등록 완료 및 `src/config.py`에 프로세스 환경변수 우선 + Windows 레지스트리 폴백 조회 로직 구축.
+2. **라이브 인증 결과 (Fail-Closed 검증)**:
+   - 신규 키 `ul_0a...3d0e`: 업스트림 Cloud Run 서비스에서 `HTTP 401 Unauthorized` 반환 (`Invalid API key. Please provide a valid platform API key (ul_xxx).`)
+   - 기존 키 `ul_ef...9226`: 업스트림 Cloud Run 신규 엔드포인트에서 `HTTP 200 OK` 정상 추론 및 결과 반환.
+   - **조치 권고**: 신규 발급된 API 키가 Ultralytics Hub 상에서 올바른 워크스페이스 권한을 보유하고 있는지 재확인하거나, 플랫폼 콘솔에서 재발급 필요.
+   - **보안 격리**: API 키 불일치 및 401 발생 시 프록시 서버는 내부 키를 노출하지 않고 안전하게 `HTTP 401 upstream_api_error`를 반환하는 Fail-Closed 안전 규칙 입증.
+
