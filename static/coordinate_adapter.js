@@ -102,13 +102,35 @@
             throw new Error(`Invalid box dimensions for YOLO: width=${w}, height=${h}`);
         }
 
-        const xCenter = ((box.x1 + box.x2) / 2.0) / origW;
-        const yCenter = ((box.y1 + box.y2) / 2.0) / origH;
-        const normW = w / origW;
-        const normH = h / origH;
+        const eps = 1e-4;
+        if (box.x1 < -eps || box.y1 < -eps || box.x2 > (origW + eps) || box.y2 > (origH + eps)) {
+            throw new Error(`Box coordinates exceed frame boundaries: [x1=${box.x1}, y1=${box.y1}, x2=${box.x2}, y2=${box.y2}] for frame ${origW}x${origH}`);
+        }
+
+        const clampedX1 = Math.max(0, Math.min(origW, box.x1));
+        const clampedY1 = Math.max(0, Math.min(origH, box.y1));
+        const clampedX2 = Math.max(0, Math.min(origW, box.x2));
+        const clampedY2 = Math.max(0, Math.min(origH, box.y2));
+        const clampedW = clampedX2 - clampedX1;
+        const clampedH = clampedY2 - clampedY1;
+
+        if (clampedW <= 0 || clampedH <= 0) {
+            throw new Error(`Degenerate clamped box for YOLO: [${clampedX1}, ${clampedY1}, ${clampedX2}, ${clampedY2}]`);
+        }
+
+        const xCenter = ((clampedX1 + clampedX2) / 2.0) / origW;
+        const yCenter = ((clampedY1 + clampedY2) / 2.0) / origH;
+        const normW = clampedW / origW;
+        const normH = clampedH / origH;
 
         if (xCenter < 0 || xCenter > 1 || yCenter < 0 || yCenter > 1 || normW <= 0 || normW > 1 || normH <= 0 || normH > 1) {
             throw new Error(`Normalized coordinates out of bounds: xCenter=${xCenter}, yCenter=${yCenter}, w=${normW}, h=${normH}`);
+        }
+        if ((xCenter - normW / 2.0) < -eps || (xCenter + normW / 2.0) > (1.0 + eps)) {
+            throw new Error(`Normalized horizontal span out of bounds [0, 1]: [${xCenter - normW / 2.0}, ${xCenter + normW / 2.0}]`);
+        }
+        if ((yCenter - normH / 2.0) < -eps || (yCenter + normH / 2.0) > (1.0 + eps)) {
+            throw new Error(`Normalized vertical span out of bounds [0, 1]: [${yCenter - normH / 2.0}, ${yCenter + normH / 2.0}]`);
         }
 
         return {

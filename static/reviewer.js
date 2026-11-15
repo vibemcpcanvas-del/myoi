@@ -69,6 +69,19 @@
                 this.canvas.onmouseup = () => this.handleCanvasMouseUp();
                 this.canvas.onmouseleave = () => this.handleCanvasMouseUp();
             }
+
+            // Keyboard shortcut: Delete or Backspace removes selected box
+            window.addEventListener('keydown', (e) => {
+                if (e.key === 'Delete' || e.key === 'Backspace') {
+                    const modal = $('reviewModal');
+                    if (modal && !modal.classList.contains('hidden')) {
+                        if (document.activeElement && ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+                            return;
+                        }
+                        this.deleteSelectedBox();
+                    }
+                }
+            });
         }
 
         addRecord(record) {
@@ -104,6 +117,8 @@
             document.getElementById('cntPending').innerText = counts.pending;
             document.getElementById('cntApproved').innerText = counts.approved;
             document.getElementById('cntRejected').innerText = counts.rejected;
+            const errBox = document.getElementById('cntError');
+            if (errBox && window.AppState) errBox.innerText = window.AppState.errorCount || 0;
 
             document.getElementById('tabCountAll').innerText = counts.total;
             document.getElementById('tabCountPending').innerText = counts.pending;
@@ -183,14 +198,29 @@
             const rec = this.records[this.currentRecordIndex];
             if (!rec) return;
 
-            // Collect known classes from window.AppState.cls
-            const classes = window.AppState ? window.AppState.cls : {};
-            const keys = Object.keys(classes);
-            if (keys.length === 0) {
-                sel.innerHTML = '<option value="0">Class 0</option>';
-            } else {
-                sel.innerHTML = keys.map(k => `<option value="${k}">${classes[k].name || 'Class ' + k}</option>`).join('');
+            const knownClasses = {};
+            const appCls = window.AppState ? window.AppState.cls : {};
+            Object.keys(appCls).forEach(k => {
+                knownClasses[parseInt(k)] = appCls[k].name || ('Class ' + k);
+            });
+
+            const annotations = rec.reviewedAnnotations || rec.detections || [];
+            annotations.forEach(a => {
+                const cid = parseInt(a.classId || 0);
+                if (!knownClasses[cid]) {
+                    knownClasses[cid] = a.className || ('Class ' + cid);
+                }
+            });
+
+            const cids = Object.keys(knownClasses).map(k => parseInt(k)).sort((a, b) => a - b);
+            if (cids.length === 0) {
+                knownClasses[0] = 'Class 0';
+                cids.push(0);
             }
+
+            let html = cids.map(cid => `<option value="${cid}">${knownClasses[cid]}</option>`).join('');
+            html += '<option value="__new__">+ 새 클래스 등록...</option>';
+            sel.innerHTML = html;
         }
 
         setViewMode(mode) {
@@ -236,12 +266,12 @@
                     const color = this.COLORS[(ann.classId || 0) % this.COLORS.length];
 
                     this.ctx.strokeStyle = isSel ? '#ffffff' : color;
-                    this.ctx.lineWidth = isSel ? 4 : 2;
+                    this.ctx.lineWidth = isSel ? Math.max(3, Math.round(this.canvas.width / 400)) : Math.max(2, Math.round(this.canvas.width / 600));
                     this.ctx.strokeRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
 
                     // Box Fill with slight alpha when selected
                     if (isSel) {
-                        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+                        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
                         this.ctx.fillRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
                         // Draw corner handles
                         this.drawHandle(b.x1, b.y1);
@@ -253,18 +283,20 @@
                     // Label badge
                     const label = `${ann.className || 'C' + ann.classId} ${(ann.confidence ? (ann.confidence * 100).toFixed(0) + '%' : '')}`;
                     this.ctx.fillStyle = color;
-                    this.ctx.font = 'bold 16px sans-serif';
-                    this.ctx.fillText(label, b.x1, Math.max(20, b.y1 - 6));
+                    const fontSize = Math.max(14, Math.round(this.canvas.width / 80));
+                    this.ctx.font = `bold ${fontSize}px sans-serif`;
+                    this.ctx.fillText(label, b.x1, Math.max(fontSize + 4, b.y1 - 6));
                 });
             }
         }
 
         drawHandle(x, y) {
+            const size = Math.max(10, Math.round(this.canvas.width / 140));
             this.ctx.fillStyle = '#ffffff';
             this.ctx.strokeStyle = '#000000';
-            this.ctx.lineWidth = 2;
-            this.ctx.fillRect(x - 6, y - 6, 12, 12);
-            this.ctx.strokeRect(x - 6, y - 6, 12, 12);
+            this.ctx.lineWidth = Math.max(1.5, size / 5);
+            this.ctx.fillRect(x - size / 2, y - size / 2, size, size);
+            this.ctx.strokeRect(x - size / 2, y - size / 2, size, size);
         }
 
         getCanvasCoordinates(e) {
@@ -286,16 +318,19 @@
             this.dragStart = pos;
 
             if (this.isAddingBox) {
-                // Begin drawing new box
+                // Begin drawing new box from click origin
+                this.boxOrigin = { x: pos.x, y: pos.y };
+                const selectedClassId = parseInt(document.getElementById('selBoxClass').value) || 0;
+                const selectedClassName = document.getElementById('selBoxClass').selectedOptions[0]?.text || ('Class ' + selectedClassId);
                 const newAnn = {
-                    classId: parseInt(document.getElementById('selBoxClass').value) || 0,
-                    className: document.getElementById('selBoxClass').selectedOptions[0]?.text || 'Target',
+                    classId: selectedClassId,
+                    className: selectedClassName,
                     confidence: 1.0,
-                    box: { x1: pos.x, y1: pos.y, x2: pos.x + 5, y2: pos.y + 5 }
+                    box: { x1: pos.x, y1: pos.y, x2: pos.x + 1, y2: pos.y + 1, width: 1, height: 1 }
                 };
                 rec.reviewedAnnotations.push(newAnn);
                 this.selectedBoxIndex = rec.reviewedAnnotations.length - 1;
-                this.dragHandle = 'se';
+                this.dragHandle = 'drawing';
                 this.isDragging = true;
                 this.drawCanvas();
                 return;
@@ -305,14 +340,15 @@
             const boxes = rec.reviewedAnnotations || [];
             let hitIndex = -1;
             let handleType = 'move';
+            const handleRadius = Math.max(18, Math.round(this.canvas.width / 80));
 
             // First check selected box handles
             if (this.selectedBoxIndex >= 0 && this.selectedBoxIndex < boxes.length) {
                 const b = boxes[this.selectedBoxIndex].box;
-                if (Math.hypot(pos.x - b.x1, pos.y - b.y1) < 15) handleType = 'nw';
-                else if (Math.hypot(pos.x - b.x2, pos.y - b.y1) < 15) handleType = 'ne';
-                else if (Math.hypot(pos.x - b.x2, pos.y - b.y2) < 15) handleType = 'se';
-                else if (Math.hypot(pos.x - b.x1, pos.y - b.y2) < 15) handleType = 'sw';
+                if (Math.hypot(pos.x - b.x1, pos.y - b.y1) < handleRadius) handleType = 'nw';
+                else if (Math.hypot(pos.x - b.x2, pos.y - b.y1) < handleRadius) handleType = 'ne';
+                else if (Math.hypot(pos.x - b.x2, pos.y - b.y2) < handleRadius) handleType = 'se';
+                else if (Math.hypot(pos.x - b.x1, pos.y - b.y2) < handleRadius) handleType = 'sw';
                 else if (pos.x >= b.x1 && pos.x <= b.x2 && pos.y >= b.y1 && pos.y <= b.y2) handleType = 'move';
                 else handleType = null;
 
@@ -349,24 +385,47 @@
             if (!rec) return;
 
             const pos = this.getCanvasCoordinates(e);
-            const dx = pos.x - this.dragStart.x;
-            const dy = pos.y - this.dragStart.y;
             const b = rec.reviewedAnnotations[this.selectedBoxIndex].box;
 
-            if (this.dragHandle === 'move' && this.activeBoxInitial) {
+            if (this.dragHandle === 'drawing' && this.boxOrigin) {
+                b.x1 = Math.round(Math.max(0, Math.min(this.boxOrigin.x, pos.x)));
+                b.y1 = Math.round(Math.max(0, Math.min(this.boxOrigin.y, pos.y)));
+                b.x2 = Math.round(Math.min(this.canvas.width, Math.max(this.boxOrigin.x, pos.x)));
+                b.y2 = Math.round(Math.min(this.canvas.height, Math.max(this.boxOrigin.y, pos.y)));
+                b.width = b.x2 - b.x1;
+                b.height = b.y2 - b.y1;
+            } else if (this.dragHandle === 'move' && this.activeBoxInitial) {
+                const dx = pos.x - this.dragStart.x;
+                const dy = pos.y - this.dragStart.y;
                 const init = this.activeBoxInitial;
                 const w = init.x2 - init.x1;
                 const h = init.y2 - init.y1;
-                b.x1 = Math.max(0, Math.min(this.canvas.width - w, init.x1 + dx));
-                b.y1 = Math.max(0, Math.min(this.canvas.height - h, init.y1 + dy));
+                b.x1 = Math.round(Math.max(0, Math.min(this.canvas.width - w, init.x1 + dx)));
+                b.y1 = Math.round(Math.max(0, Math.min(this.canvas.height - h, init.y1 + dy)));
                 b.x2 = b.x1 + w;
                 b.y2 = b.y1 + h;
+                b.width = w;
+                b.height = h;
             } else if (this.dragHandle === 'se') {
-                b.x2 = Math.max(b.x1 + 10, Math.min(this.canvas.width, pos.x));
-                b.y2 = Math.max(b.y1 + 10, Math.min(this.canvas.height, pos.y));
+                b.x2 = Math.round(Math.max(b.x1 + 5, Math.min(this.canvas.width, pos.x)));
+                b.y2 = Math.round(Math.max(b.y1 + 5, Math.min(this.canvas.height, pos.y)));
+                b.width = b.x2 - b.x1;
+                b.height = b.y2 - b.y1;
             } else if (this.dragHandle === 'nw') {
-                b.x1 = Math.min(b.x2 - 10, Math.max(0, pos.x));
-                b.y1 = Math.min(b.y2 - 10, Math.max(0, pos.y));
+                b.x1 = Math.round(Math.min(b.x2 - 5, Math.max(0, pos.x)));
+                b.y1 = Math.round(Math.min(b.y2 - 5, Math.max(0, pos.y)));
+                b.width = b.x2 - b.x1;
+                b.height = b.y2 - b.y1;
+            } else if (this.dragHandle === 'ne') {
+                b.x2 = Math.round(Math.max(b.x1 + 5, Math.min(this.canvas.width, pos.x)));
+                b.y1 = Math.round(Math.min(b.y2 - 5, Math.max(0, pos.y)));
+                b.width = b.x2 - b.x1;
+                b.height = b.y2 - b.y1;
+            } else if (this.dragHandle === 'sw') {
+                b.x1 = Math.round(Math.min(b.x2 - 5, Math.max(0, pos.x)));
+                b.y2 = Math.round(Math.max(b.y1 + 5, Math.min(this.canvas.height, pos.y)));
+                b.width = b.x2 - b.x1;
+                b.height = b.y2 - b.y1;
             }
 
             this.drawCanvas();
@@ -376,6 +435,21 @@
             if (this.isAddingBox) {
                 this.isAddingBox = false;
                 document.getElementById('btnAddBox').className = 'bg-blue-100 text-blue-700 hover:bg-blue-200 px-2 py-1 rounded text-xs';
+                const rec = this.records[this.currentRecordIndex];
+                if (rec && this.selectedBoxIndex >= 0) {
+                    const b = rec.reviewedAnnotations[this.selectedBoxIndex].box;
+                    if (b.width < 5 || b.height < 5) {
+                        const origX = this.boxOrigin ? this.boxOrigin.x : b.x1;
+                        const origY = this.boxOrigin ? this.boxOrigin.y : b.y1;
+                        b.x1 = Math.max(0, Math.round(origX - 40));
+                        b.y1 = Math.max(0, Math.round(origY - 40));
+                        b.x2 = Math.min(this.canvas.width, b.x1 + 80);
+                        b.y2 = Math.min(this.canvas.height, b.y1 + 80);
+                        b.width = b.x2 - b.x1;
+                        b.height = b.y2 - b.y1;
+                    }
+                }
+                this.boxOrigin = null;
             }
             this.isDragging = false;
             this.dragHandle = null;
@@ -403,9 +477,33 @@
         updateSelectedBoxClass(classId) {
             const rec = this.records[this.currentRecordIndex];
             if (!rec || this.selectedBoxIndex < 0) return;
+
+            const sel = document.getElementById('selBoxClass');
+            if (classId === '__new__') {
+                const newIdStr = prompt('새 클래스 ID를 입력하세요 (0 이상의 정수):');
+                if (newIdStr === null) {
+                    this.updateClassSelectDropdown();
+                    return;
+                }
+                const newId = parseInt(newIdStr);
+                if (isNaN(newId) || newId < 0) {
+                    alert('유효하지 않은 클래스 ID입니다. 0 이상의 정수를 입력해야 합니다.');
+                    this.updateClassSelectDropdown();
+                    return;
+                }
+                const newName = prompt('새 클래스 이름을 입력하세요:', `Class_${newId}`) || `Class_${newId}`;
+                if (window.AppState) {
+                    window.AppState.cls[newId] = { name: newName, on: true, alt: true, cnf: 0.25, count: 0 };
+                    localStorage.setItem('schale_cls_v3', JSON.stringify(window.AppState.cls));
+                }
+                this.updateClassSelectDropdown();
+                sel.value = String(newId);
+                classId = String(newId);
+            }
+
             const ann = rec.reviewedAnnotations[this.selectedBoxIndex];
             ann.classId = parseInt(classId);
-            ann.className = document.getElementById('selBoxClass').selectedOptions[0]?.text || ('Class ' + classId);
+            ann.className = sel.selectedOptions[0]?.text || ('Class ' + classId);
             this.drawCanvas();
         }
 
@@ -414,13 +512,22 @@
             if (!rec) return;
 
             if (status === 'approved') {
-                // Invariant validation before approval:
-                // Check if any box is invalid, degenerate, or out-of-bounds
+                // Invariant 1: Unverified coordinate space strictly blocked
+                if (rec.coordinateSpace === 'unknown' || rec.coordinateTransformStatus === 'unverified') {
+                    alert('승인 불가: 좌표계가 검증되지 않았거나(unknown) 변환에 실패한 프레임은 학습용 라벨로 승인할 수 없습니다.');
+                    return;
+                }
+
+                // Invariant 2: Box boundaries and degeneracy validation
                 const boxes = rec.reviewedAnnotations || [];
                 for (let i = 0; i < boxes.length; i++) {
                     const b = boxes[i].box;
                     if (b.x2 <= b.x1 || b.y2 <= b.y1 || b.x1 < 0 || b.y1 < 0 || b.x2 > rec.originalWidth || b.y2 > rec.originalHeight) {
                         alert(`승인 불가: 박스 [${i + 1}]의 좌표가 비정상입니다. (x1:${b.x1}, y1:${b.y1}, x2:${b.x2}, y2:${b.y2})`);
+                        return;
+                    }
+                    if (typeof boxes[i].classId !== 'number' || boxes[i].classId < 0) {
+                        alert(`승인 불가: 박스 [${i + 1}]의 클래스 ID(${boxes[i].classId})가 비정상입니다.`);
                         return;
                     }
                 }

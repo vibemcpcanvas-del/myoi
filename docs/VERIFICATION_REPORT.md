@@ -27,10 +27,10 @@
 | `static/coordinate_adapter.js` | 신규 | 프런트엔드용 종횡비 보존 Letterbox 및 좌표 변환 모듈 |
 | `static/reviewer.js` | 신규 | 대화형 바운딩 박스 이동/크기조절/추가/삭제 및 승인/제외/보류 판정 에디터 |
 | `static/app.js` | 신규 | 스트리밍 캡처, Letterbox 추론, 쿨다운 제어, 경고(Beep/TTS) 및 수집 파이프라인 제어 |
-| `tests/test_proxy_server.py` | 신규 | 프록시 엔드포인트, 입력 검증, 503 안전 실패, 비밀키 노출 차단 테스트 (6종 PASS) |
-| `tests/test_coordinate_adapter.py` | 신규 | 가로(1920x1080), 4:3(640x480), 세로(1080x1920), 미확인 좌표 차단, YOLO 정규화 테스트 (5종 PASS) |
-| `tests/test_yolo_export.py` | 신규 | 미검수/제외 데이터 누락, 다중 세션 분할, 해시 중복 차단 테스트 (4종 PASS) |
-| `tests/test_collection_lifecycle.py` | 신규 | 비활성 클래스 제외, 신뢰도 미달 제외, 연속 프레임 조건, 쿨다운 억제, 해상도 보존, 생명주기 정리, 회귀 방지 테스트 (7종 PASS) |
+| `tests/test_proxy_server.py` | 신규 | 프록시 엔드포인트, 입력 검증, 503 안전 실패, 비밀키 노출 차단, 내보내기 엔드포인트 테스트 (8종 PASS) |
+| `tests/test_coordinate_adapter.py` | 신규 | 가로(1920x1080), 4:3(640x480), 세로(1080x1920), 미확인 좌표 차단, 경계 밖 박스 차단, YOLO 정규화 테스트 (5종 PASS) |
+| `tests/test_yolo_export.py` | 신규 | 미검수/제외 데이터 누락, 다중 세션 분할, 해시 중복 차단, 고정 클래스 ID 보존, manifest base64 정화, 빈 val 폴더 보장 테스트 (8종 PASS) |
+| `tests/test_collection_lifecycle.py` | 신규 | 비활성 클래스 제외, 신뢰도 미달 제외, 연속 프레임 조건, 쿨다운 억제, 해상도 보존, 생명주기 정리, 회귀 방지, 오류 카운터, Node.js JS 구동 테스트 (9종 PASS) |
 | `WBS.md` | 수정 | WBS-01 ~ WBS-04 패키지 정의 및 상태 전이 관리 |
 
 ---
@@ -105,4 +105,4 @@
 | **14** | 화면 공유 중지/트랙 종료 시 타이머 및 요청 정리 | `tests/test_collection_lifecycle.py::test_14_lifecycle_...` | **PASS** |
 | **15** | 기존 Beep, TTS, 클래스 설정, 작전 시작/중지 무회귀 | `tests/test_collection_lifecycle.py::test_15_audio_...` | **PASS** |
 
-**종합 검증 결과: 15/15 항목 100% 통과 (Total 35 tests passed)**
+**종합 검증 결과: 15/15 항목 100% 통과 (Total 43 tests passed across Python & Node.js test suites)**

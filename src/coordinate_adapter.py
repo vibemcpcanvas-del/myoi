@@ -146,10 +146,28 @@ def to_yolo_detection(
     if not box.is_valid():
         raise ValueError(f"Invalid box for YOLO conversion: width={box.width}, height={box.height}")
 
-    x_center = ((box.x1 + box.x2) / 2.0) / orig_w
-    y_center = ((box.y1 + box.y2) / 2.0) / orig_h
-    norm_w = box.width / orig_w
-    norm_h = box.height / orig_h
+    # Boundary verification: box must not exceed original frame boundaries
+    eps = 1e-4
+    if box.x1 < -eps or box.y1 < -eps or box.x2 > (orig_w + eps) or box.y2 > (orig_h + eps):
+        raise ValueError(
+            f"Box coordinates exceed frame boundaries: [x1={box.x1}, y1={box.y1}, x2={box.x2}, y2={box.y2}] for frame {orig_w}x{orig_h}"
+        )
+
+    # Clamping for tiny floating-point precision differences
+    clamped_x1 = max(0.0, min(float(orig_w), box.x1))
+    clamped_y1 = max(0.0, min(float(orig_h), box.y1))
+    clamped_x2 = max(0.0, min(float(orig_w), box.x2))
+    clamped_y2 = max(0.0, min(float(orig_h), box.y2))
+    clamped_w = clamped_x2 - clamped_x1
+    clamped_h = clamped_y2 - clamped_y1
+
+    if clamped_w <= 0 or clamped_h <= 0:
+        raise ValueError(f"Degenerate clamped box for YOLO conversion: ({clamped_x1}, {clamped_y1}, {clamped_x2}, {clamped_y2})")
+
+    x_center = ((clamped_x1 + clamped_x2) / 2.0) / orig_w
+    y_center = ((clamped_y1 + clamped_y2) / 2.0) / orig_h
+    norm_w = clamped_w / orig_w
+    norm_h = clamped_h / orig_h
 
     # Numerical boundary verification
     for name, val in [("x_center", x_center), ("y_center", y_center)]:
@@ -158,6 +176,11 @@ def to_yolo_detection(
     for name, val in [("width", norm_w), ("height", norm_h)]:
         if not (0.0 < val <= 1.0):
             raise ValueError(f"YOLO normalized {name} out of bounds (0, 1]: {val}")
+
+    if (x_center - norm_w / 2.0) < -eps or (x_center + norm_w / 2.0) > (1.0 + eps):
+        raise ValueError(f"YOLO normalized horizontal span out of bounds [0, 1]: [{x_center - norm_w/2.0}, {x_center + norm_w/2.0}]")
+    if (y_center - norm_h / 2.0) < -eps or (y_center + norm_h / 2.0) > (1.0 + eps):
+        raise ValueError(f"YOLO normalized vertical span out of bounds [0, 1]: [{y_center - norm_h/2.0}, {y_center + norm_h/2.0}]")
 
     line = f"{class_id} {x_center:.6f} {y_center:.6f} {norm_w:.6f} {norm_h:.6f}"
 

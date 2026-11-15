@@ -107,7 +107,9 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
 
         if "imgsz" in form_data.fields:
             try:
-                imgsz = int(form_data.fields["imgsz"])
+                parsed_sz = int(form_data.fields["imgsz"])
+                if 32 <= parsed_sz <= 4096:
+                    imgsz = parsed_sz
             except ValueError:
                 pass
 
@@ -287,6 +289,7 @@ async def export_yolo_zip(request: Request):
     body = await request.json()
     records = body.get("records", [])
     images_b64 = body.get("images", {})  # filename -> base64 string
+    classes = body.get("classes")  # optional fixed class mapping
 
     if not records:
         raise HTTPException(
@@ -300,7 +303,9 @@ async def export_yolo_zip(request: Request):
         if "," in b64_str:
             b64_str = b64_str.split(",", 1)[1]
         try:
-            image_data_map[fname] = base64.b64decode(b64_str)
+            raw_bytes = base64.b64decode(b64_str)
+            image_data_map[fname] = raw_bytes
+            image_data_map[Path(fname).name] = raw_bytes
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -308,7 +313,7 @@ async def export_yolo_zip(request: Request):
             )
 
     try:
-        zip_bytes, report = validate_and_build_yolo_dataset(records, image_data_map)
+        zip_bytes, report = validate_and_build_yolo_dataset(records, image_data_map, classes=classes)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

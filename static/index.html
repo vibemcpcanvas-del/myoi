@@ -99,7 +99,10 @@
         <!-- Security and Advisory Notice -->
         <div class="bg-blue-50 border-l-4 border-blue-500 p-3 rounded text-xs text-blue-900 leading-relaxed font-medium">
             <div class="font-bold flex items-center gap-1 mb-0.5"><span>🔒</span> 보안 강화 및 프록시 중계 모드</div>
-            기존 프런트엔드 하드코딩 API 키는 완전히 제거되었습니다. 모든 추론 요청은 Same-Origin 서버 프록시(<code>/api/predict</code>)를 거쳐 서버 환경변수(<code>INFERENCE_API_KEY</code>)로 안전하게 인증됩니다.
+            <div>기존 프런트엔드에 하드코딩되었던 API 키는 완전히 제거되었습니다. 모든 추론 요청은 Same-Origin 서버 프록시(<code>/api/predict</code>)를 거쳐 서버 환경변수(<code>INFERENCE_API_KEY</code>)로 안전하게 인증됩니다.</div>
+            <div class="mt-1 text-[11px] text-amber-900 bg-amber-100 p-1.5 rounded font-bold">
+                ⚠️ 기존 키 폐기 안내: 원본 HTML에 포함되었던 기존 API 키는 공개된 것으로 간주되므로 업스트림 콘솔에서 즉시 폐기 및 재발급해야 합니다. 또한 기존 HTML 파일이 Git 커밋 기록에 남아 있다면 저장소 히스토리에서 해당 키를 완전히 제거하시기 바랍니다. 새 키는 프런트엔드에 넣지 않고 서버 환경변수로만 설정해야 합니다.
+            </div>
         </div>
     </div>
 
@@ -138,16 +141,22 @@
 
         <!-- 데이터 수집 및 검수 센터 -->
         <div class="ba-card p-4">
-            <div class="flex justify-between items-center border-b-2 border-[var(--p)] pb-1 mb-3">
+            <div class="flex justify-between items-center border-b-2 border-[var(--p)] pb-1 mb-2">
                 <div class="font-black text-[var(--p)] text-lg">학습 데이터 수집</div>
                 <label class="ba-check cursor-pointer flex items-center text-xs font-bold text-[var(--p)]">
                     <input type="checkbox" id="chkCollect"><span class="chk"></span>수집 활성화
                 </label>
             </div>
 
+            <!-- Collection Mode & Notice -->
+            <div class="flex justify-between items-center text-[10px] text-gray-500 font-bold bg-gray-100 px-2 py-1 rounded mb-2">
+                <span>저장 모드:</span>
+                <span class="text-[var(--p)]">전체 원본 화면 저장 (100% 해상도 유지)</span>
+            </div>
+
             <!-- Caution Notice -->
             <div class="text-[11px] bg-amber-50 text-amber-900 border border-amber-200 rounded p-2 mb-3 font-bold leading-tight">
-                ⚠️ 안내: 자동 예측은 정답 라벨이 아닙니다. 검수 센터에서 승인한 프레임만 학습 데이터셋(YOLO ZIP)에 포함됩니다.
+                ⚠️ 자동 예측은 정답 라벨이 아닙니다. 검수 후 승인해야 학습 데이터에 포함됩니다.
             </div>
 
             <div class="space-y-3">
@@ -166,7 +175,7 @@
                         <span class="text-gray-500">세션 ID:</span>
                         <span id="txtSessionId" class="font-mono text-[var(--p)] text-[11px]">SES_INITIAL</span>
                     </div>
-                    <div class="grid grid-cols-4 gap-1 text-center pt-1 text-[11px]">
+                    <div class="grid grid-cols-5 gap-1 text-center pt-1 text-[11px]">
                         <div class="bg-white border rounded p-1">
                             <div class="text-gray-400 text-[9px]">수집</div>
                             <div id="cntTotal" class="font-black text-gray-800">0</div>
@@ -183,7 +192,15 @@
                             <div class="text-red-500 text-[9px]">제외</div>
                             <div id="cntRejected" class="font-black text-red-600">0</div>
                         </div>
+                        <div class="bg-gray-200 border border-gray-300 rounded p-1">
+                            <div class="text-gray-600 text-[9px]">오류</div>
+                            <div id="cntError" class="font-black text-gray-700">0</div>
+                        </div>
                     </div>
+                </div>
+
+                <div class="text-[10px] text-gray-400 font-bold leading-tight">
+                    * 배경 프레임 안내: 탐지 대상이 없는 순수 배경 프레임은 기본 수집되지 않으며, 포함 시 빈 라벨(.txt)로 저장되어 오탐 방지 학습에 활용됩니다.
                 </div>
 
                 <!-- Collection Buttons -->

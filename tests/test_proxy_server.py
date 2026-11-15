@@ -105,3 +105,73 @@ def test_no_api_key_in_frontend_or_source():
                 text = file_path.read_text(encoding="utf-8", errors="ignore")
                 for pat in suspicious_patterns:
                     assert pat not in text, f"Found exposed secret key in {file_path}: {pat}"
+
+
+def test_export_yolo_endpoint_success_with_classes(client, sample_jpeg_bytes):
+    """Verify /api/export-yolo produces valid zip with classes mapping preserved."""
+    import base64
+    import zipfile
+    import yaml
+
+    b64_img = base64.b64encode(sample_jpeg_bytes).decode("utf-8")
+    payload = {
+        "records": [
+            {
+                "recordId": "rec_api_1",
+                "sessionId": "SES_PROXY",
+                "imageFile": "images/frame1.jpg",
+                "reviewStatus": "approved",
+                "originalWidth": 640,
+                "originalHeight": 640,
+                "detections": [{"classId": 2, "className": "Sniper", "box": {"x1": 50, "y1": 50, "x2": 200, "y2": 200}}],
+            }
+        ],
+        "images": {
+            "images/frame1.jpg": f"data:image/jpeg;base64,{b64_img}",
+        },
+        "classes": {
+            "2": {"name": "Sniper"},
+            "0": {"name": "Striker"},
+        },
+    }
+
+    resp = client.post("/api/export-yolo", json=payload)
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        data_yaml = yaml.safe_load(zf.read("data.yaml").decode("utf-8"))
+        assert data_yaml["names"][2] == "Sniper"
+        assert data_yaml["names"][0] == "Striker"
+        txt_content = zf.read("labels/train/frame1.txt").decode("utf-8").strip()
+        assert txt_content.startswith("2 ")
+
+
+def test_export_yolo_endpoint_blocks_unknown_coord_space(client, sample_jpeg_bytes):
+    """Verify /api/export-yolo rejects records with coordinateSpace: 'unknown'."""
+    import base64
+
+    b64_img = base64.b64encode(sample_jpeg_bytes).decode("utf-8")
+    payload = {
+        "records": [
+            {
+                "recordId": "rec_unknown",
+                "sessionId": "SES_PROXY",
+                "imageFile": "images/frame1.jpg",
+                "coordinateSpace": "unknown",
+                "reviewStatus": "approved",
+                "originalWidth": 640,
+                "originalHeight": 640,
+                "detections": [{"classId": 0, "className": "Target", "box": {"x1": 10, "y1": 10, "x2": 50, "y2": 50}}],
+            }
+        ],
+        "images": {
+            "images/frame1.jpg": b64_img,
+        },
+    }
+
+    resp = client.post("/api/export-yolo", json=payload)
+    assert resp.status_code == 400
+    err = resp.json()
+    assert err["detail"]["error"] == "validation_failed"
+    assert "coordinateSpace is unverified" in err["detail"]["message"]

@@ -20,13 +20,18 @@ def parse_multipart_body(body: bytes, content_type_header: str) -> ParsedFormDat
         return result
 
     # Prepend synthetic MIME header so email parser understands it
-    raw_mime = b"Content-Type: " + content_type_header.encode("latin-1") + b"\r\n\r\n" + body
+    safe_header = content_type_header.encode("utf-8", errors="replace")
+    raw_mime = b"Content-Type: " + safe_header + b"\r\n\r\n" + body
     msg = email.message_from_bytes(raw_mime)
 
     if not msg.is_multipart():
         return result
 
-    for part in msg.get_payload():
+    parts = msg.get_payload()
+    if not isinstance(parts, list):
+        return result
+
+    for part in parts:
         disposition = part.get("Content-Disposition", "")
         if "form-data" not in disposition:
             continue
@@ -37,7 +42,9 @@ def parse_multipart_body(body: bytes, content_type_header: str) -> ParsedFormDat
 
         filename = part.get_param("filename", header="Content-Disposition")
         part_content_type = part.get_content_type() or "application/octet-stream"
-        payload = part.get_payload(decode=True) or b""
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            payload = b""
 
         if filename is not None:
             result.files[name] = (filename, payload, part_content_type)

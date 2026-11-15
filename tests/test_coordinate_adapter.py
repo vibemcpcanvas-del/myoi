@@ -150,3 +150,12 @@ def test_11_yolo_normalization_and_zero_indexed_class():
     degenerate_box = BoundingBox(100.0, 100.0, 100.0, 100.0)
     with pytest.raises(ValueError, match="Invalid box for YOLO conversion"):
         to_yolo_detection(degenerate_box, orig_w, orig_h, class_id=1)
+
+    # Verify out-of-bounds boxes are rejected
+    oob_box_neg = BoundingBox(-10.0, 50.0, 100.0, 200.0)
+    with pytest.raises(ValueError, match="Box coordinates exceed frame boundaries"):
+        to_yolo_detection(oob_box_neg, orig_w, orig_h, class_id=0)
+
+    oob_box_overflow = BoundingBox(100.0, 50.0, 2000.0, 200.0)
+    with pytest.raises(ValueError, match="Box coordinates exceed frame boundaries"):
+        to_yolo_detection(oob_box_overflow, orig_w, orig_h, class_id=0)

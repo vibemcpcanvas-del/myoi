@@ -3,15 +3,20 @@ Ultralytics YOLO detect format dataset generator and validator.
 Enforces strict gate invariants:
 - Only approved images are included.
 - Coordinates strictly normalized [0, 1] with 0-indexed class IDs.
+- Preserves actual fixed class IDs (no dynamic reassignment).
+- Rejects unverified coordinate spaces ('unknown').
+- Validates bounding box boundary integrity.
 - Train/Val split by session to prevent frame leakage.
 - Hash-based duplicate detection.
-- Generates data.yaml and manifest.json.
+- Generates data.yaml, manifest.json, and manifest.jsonl with sanitized metadata.
 """
 
+from datetime import datetime, timezone
 import hashlib
 import io
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 import zipfile
 import yaml
 
@@ -22,28 +27,48 @@ def compute_sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _sanitize_record_for_manifest(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """Strips large in-memory transport fields (base64, blobs) from manifest records."""
+    excluded_fields = {"origBase64", "prevBase64", "origBlob", "prevBlob"}
+    clean_rec = {k: v for k, v in rec.items() if k not in excluded_fields}
+    return clean_rec
+
+
 def validate_and_build_yolo_dataset(
     manifest_records: List[Dict[str, Any]],
     image_data_map: Dict[str, bytes],
     allow_single_session_fallback: bool = True,
+    classes: Optional[Dict[Any, Any]] = None,
 ) -> Tuple[bytes, Dict[str, Any]]:
     """Validates records and packages an Ultralytics YOLO detect ZIP archive.
     Returns: (zip_bytes, validation_report)
     """
-    report = {
+    report: Dict[str, Any] = {
         "totalRecords": len(manifest_records),
         "approvedCount": 0,
         "pendingCount": 0,
         "rejectedCount": 0,
         "trainCount": 0,
         "valCount": 0,
+        "trainImageCount": 0,
+        "valImageCount": 0,
+        "trainObjectCount": 0,
+        "valObjectCount": 0,
         "classDistribution": {},
         "warnings": [],
         "errors": [],
+        "duplicateImages": [],
+        "checks": {
+            "approvedRecordsChecked": False,
+            "coordinateSpaceVerified": False,
+            "boxBoundariesVerified": False,
+            "classIdsVerified": False,
+            "noLeakageVerified": False,
+        },
     }
 
     # 1. Triage by reviewStatus
-    approved_records = []
+    approved_records: List[Dict[str, Any]] = []
     for rec in manifest_records:
         status = rec.get("reviewStatus", "pending")
         if status == "approved":
@@ -57,22 +82,47 @@ def validate_and_build_yolo_dataset(
     if len(approved_records) == 0:
         raise ValueError("Cannot export YOLO dataset: Zero approved images found. Unreviewed/rejected images are strictly excluded.")
 
-    # 2. Collect and build fixed 0-indexed class mapping
-    class_name_to_id: Dict[str, int] = {}
-    class_id_to_name: Dict[int, str] = {}
+    report["checks"]["approvedRecordsChecked"] = True
+
+    # 2. Strict Coordinate Space Verification
     for rec in approved_records:
-        # Check either reviewedAnnotations or detections
+        c_space = rec.get("coordinateSpace", "letterbox_640")
+        c_status = rec.get("coordinateTransformStatus", "verified")
+        if c_space == "unknown" or c_status == "unverified":
+            raise ValueError(
+                f"Cannot export record '{rec.get('recordId')}': coordinateSpace is unverified ('{c_space}')."
+            )
+
+    report["checks"]["coordinateSpaceVerified"] = True
+
+    # 3. Collect and build fixed class mapping (preserve true class IDs)
+    class_id_to_name: Dict[int, str] = {}
+    if classes:
+        for cid_key, cval in classes.items():
+            try:
+                cid_int = int(cid_key)
+                c_name = cval.get("name") if isinstance(cval, dict) else str(cval)
+                class_id_to_name[cid_int] = c_name or f"Class_{cid_int}"
+            except (ValueError, TypeError):
+                pass
+
+    for rec in approved_records:
         annotations = rec.get("reviewedAnnotations") or rec.get("detections") or []
         for ann in annotations:
-            c_name = str(ann.get("className") or f"Class_{ann.get('classId', 0)}")
-            if c_name not in class_name_to_id:
-                new_id = len(class_name_to_id)
-                class_name_to_id[c_name] = new_id
-                class_id_to_name[new_id] = c_name
-                report["classDistribution"][c_name] = 0
-            report["classDistribution"][c_name] += 1
+            cid = int(ann.get("classId", 0))
+            if cid < 0:
+                raise ValueError(f"Negative classId {cid} found in record '{rec.get('recordId')}'. Class ID must be >= 0.")
+            c_name = str(ann.get("className") or f"Class_{cid}")
+            if cid not in class_id_to_name:
+                class_id_to_name[cid] = c_name
+            report["classDistribution"][c_name] = report["classDistribution"].get(c_name, 0) + 1
 
-    # 3. Train / Val split (Session-based to prevent consecutive frame leakage)
+    if not class_id_to_name:
+        class_id_to_name[0] = "DefaultClass"
+
+    report["checks"]["classIdsVerified"] = True
+
+    # 4. Train / Val split (Session-based to prevent consecutive frame leakage)
     sessions: Dict[str, List[Dict[str, Any]]] = {}
     for rec in approved_records:
         sid = rec.get("sessionId", "default_session")
@@ -82,9 +132,7 @@ def validate_and_build_yolo_dataset(
     val_records: List[Dict[str, Any]] = []
 
     if len(sessions) > 1:
-        # Multi-session: assign whole sessions to train or val
         sorted_sessions = sorted(sessions.keys())
-        # Roughly 80% sessions to train, at least 1 session to val
         val_session_count = max(1, int(round(len(sorted_sessions) * 0.2)))
         val_sessions = set(sorted_sessions[-val_session_count:])
 
@@ -94,7 +142,6 @@ def validate_and_build_yolo_dataset(
             else:
                 train_records.extend(recs)
     else:
-        # Single session fallback
         if not allow_single_session_fallback:
             raise ValueError(
                 "Export blocked: Only 1 session is present. Multi-session split required to prevent data leakage."
@@ -117,52 +164,76 @@ def validate_and_build_yolo_dataset(
 
     report["trainCount"] = len(train_records)
     report["valCount"] = len(val_records)
+    report["trainImageCount"] = len(train_records)
+    report["valImageCount"] = len(val_records)
 
-    # 4. Hash verification: ensure no identical frames leak across train and val
+    # 5. Image payload lookup and hash duplicate verification
+    def resolve_image_bytes(img_path: str) -> bytes:
+        if img_path in image_data_map:
+            return image_data_map[img_path]
+        fname = Path(img_path).name
+        if fname in image_data_map:
+            return image_data_map[fname]
+        for k, v in image_data_map.items():
+            if Path(k).name == fname:
+                return v
+        raise ValueError(f"Missing image payload for approved record: {img_path}")
+
     train_hashes: Dict[str, str] = {}
     for r in train_records:
         img_name = r.get("imageFile", "")
-        img_bytes = image_data_map.get(img_name)
-        if not img_bytes:
-            raise ValueError(f"Missing image payload for approved record: {img_name}")
+        img_bytes = resolve_image_bytes(img_name)
         h = compute_sha256(img_bytes)
+        if h in train_hashes:
+            report["duplicateImages"].append(f"Train duplicate: '{img_name}' has same content as '{train_hashes[h]}'")
         train_hashes[h] = img_name
 
+    val_hashes: Dict[str, str] = {}
     for r in val_records:
         img_name = r.get("imageFile", "")
-        img_bytes = image_data_map.get(img_name)
-        if not img_bytes:
-            raise ValueError(f"Missing image payload for approved record: {img_name}")
+        img_bytes = resolve_image_bytes(img_name)
         h = compute_sha256(img_bytes)
         if h in train_hashes:
             raise ValueError(
                 f"Data leakage detected! Identical frame hash '{h}' exists in both train ({train_hashes[h]}) and val ({img_name})."
             )
+        if h in val_hashes:
+            report["duplicateImages"].append(f"Val duplicate: '{img_name}' has same content as '{val_hashes[h]}'")
+        val_hashes[h] = img_name
 
-    # 5. Build ZIP archive
+    report["checks"]["noLeakageVerified"] = True
+
+    # 6. Build ZIP archive
     zip_buffer = io.BytesIO()
+    train_obj_count = 0
+    val_obj_count = 0
+
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Process train and val
+        # Pre-create directory structures
+        zf.writestr("images/train/", "")
+        zf.writestr("images/val/", "")
+        zf.writestr("labels/train/", "")
+        zf.writestr("labels/val/", "")
+
         for split_name, record_list in [("train", train_records), ("val", val_records)]:
             for rec in record_list:
                 img_path_in_rec = rec.get("imageFile", "")
-                img_filename = img_path_in_rec.split("/")[-1].split("\\")[-1]
+                img_filename = Path(img_path_in_rec).name
                 base_name = img_filename.rsplit(".", 1)[0]
                 label_filename = f"{base_name}.txt"
 
-                img_bytes = image_data_map[img_path_in_rec]
+                img_bytes = resolve_image_bytes(img_path_in_rec)
                 orig_w = rec.get("originalWidth", 1920)
                 orig_h = rec.get("originalHeight", 1080)
 
                 # Write image
                 zf.writestr(f"images/{split_name}/{img_filename}", img_bytes)
 
-                # Build YOLO label lines
+                # Build YOLO label lines using true classId
                 annotations = rec.get("reviewedAnnotations") or rec.get("detections") or []
                 label_lines: List[str] = []
                 for ann in annotations:
-                    c_name = str(ann.get("className") or f"Class_{ann.get('classId', 0)}")
-                    class_id = class_name_to_id[c_name]
+                    class_id = int(ann.get("classId", 0))
                     box_data = ann.get("box", {})
                     if isinstance(box_data, dict):
                         b = BoundingBox(
@@ -178,11 +249,19 @@ def validate_and_build_yolo_dataset(
 
                     yolo_det = to_yolo_detection(b, orig_w, orig_h, class_id)
                     label_lines.append(yolo_det["yolo_line"])
+                    if split_name == "train":
+                        train_obj_count += 1
+                    else:
+                        val_obj_count += 1
 
                 label_content = "\n".join(label_lines) + ("\n" if label_lines else "")
                 zf.writestr(f"labels/{split_name}/{label_filename}", label_content)
 
-        # Write data.yaml
+        report["trainObjectCount"] = train_obj_count
+        report["valObjectCount"] = val_obj_count
+        report["checks"]["boxBoundariesVerified"] = True
+
+        # Write data.yaml preserving exact class mapping
         yaml_content = {
             "path": ".",
             "train": "images/train",
@@ -191,15 +270,23 @@ def validate_and_build_yolo_dataset(
         }
         zf.writestr("data.yaml", yaml.dump(yaml_content, sort_keys=False))
 
-        # Write session manifest
+        # Sanitize records for manifest to prevent base64 bloat
+        sanitized_records = [_sanitize_record_for_manifest(r) for r in approved_records]
+        exported_at_utc = datetime.now(timezone.utc).isoformat()
+
+        # Write manifest.json
         export_manifest = {
             "schemaVersion": "1.0.0",
-            "exportedAtUtc": rec.get("capturedAtUtc", ""),
+            "exportedAtUtc": exported_at_utc,
             "report": report,
-            "classes": class_id_to_name,
-            "approvedRecords": approved_records,
+            "classes": {str(cid): class_id_to_name[cid] for cid in sorted(class_id_to_name.keys())},
+            "approvedRecords": sanitized_records,
         }
         zf.writestr("manifest.json", json.dumps(export_manifest, indent=2, ensure_ascii=False))
+
+        # Write manifest.jsonl (line-by-line JSONL format support per Requirement 5.2 & 7)
+        jsonl_lines = [json.dumps(r, ensure_ascii=False) for r in sanitized_records]
+        zf.writestr("manifest.jsonl", "\n".join(jsonl_lines) + ("\n" if jsonl_lines else ""))
 
     zip_bytes = zip_buffer.getvalue()
     return zip_bytes, report

@@ -26,6 +26,8 @@
         timer: null,
         abortController: null,
         isRunning: false,
+        isInferenceInFlight: false,
+        errorCount: 0,
         cls: JSON.parse(localStorage.getItem('schale_cls_v3') || '{}'),
         lastTTS: {},
         lastBeep: 0,
@@ -84,6 +86,27 @@
     $('iFrame').oninput = e => $('vFrame').innerText = e.target.value;
     $('iCooldown').oninput = e => $('vCooldown').innerText = Number(e.target.value).toFixed(1) + 's';
     $('chkHideVid').onchange = e => { $('vid').style.opacity = e.target.checked ? '0' : '1'; };
+
+    // Data Collection Consent Confirmation
+    $('chkCollect').onchange = (e) => {
+        if (e.target.checked) {
+            const ok = confirm(
+                "【SCHALE 데이터 수집 안내 및 동의】\n\n" +
+                "1. 스트림의 전체 원본 해상도(100% 원본 비율) 프레임이 메모리에 수집됩니다.\n" +
+                "2. 자동 예측은 정답 라벨이 아니며, 검수 센터에서 사람이 직접 승인한 프레임만 학습 데이터셋(YOLO ZIP)에 포함됩니다.\n" +
+                "3. 수집된 프레임은 브라우저 다운로드/내보내기로 관리되며 외부 서버로 무단 자동 업로드되지 않습니다.\n\n" +
+                "데이터 수집을 활성화하시겠습니까?"
+            );
+            if (!ok) {
+                e.target.checked = false;
+                toast("데이터 수집이 취소되었습니다.");
+                return;
+            }
+            toast("학습 데이터 수집 활성화됨");
+        } else {
+            toast("데이터 수집 비활성화됨");
+        }
+    };
 
     $('btnReset').onclick = () => {
         state.cls = {};
@@ -176,6 +199,7 @@
 
     const stopOps = () => {
         state.isRunning = false;
+        state.isInferenceInFlight = false;
         clearTimeout(state.timer);
         if (state.abortController) {
             state.abortController.abort();
@@ -190,7 +214,7 @@
         $('vid').srcObject = null;
         $('overlayStandby').style.display = 'flex';
         $('btnShare').querySelector('span').innerText = "화면 공유";
-        $('btnStart').classList.remove('hidden');
+        $('btnStart').classList.add('hidden');
         $('btnStop').classList.add('hidden');
         $('statusTxt').innerText = "연결이 해제되었습니다.";
         $('resolutionInfo').innerText = "해상도: 대기 중";
@@ -232,14 +256,18 @@
     // --- Inference & Drawing Loop ---
     const loop = async () => {
         if (!state.isRunning || !state.stream) return;
+        if (state.isInferenceInFlight) return;
 
         const vw = $('vid').videoWidth;
         const vh = $('vid').videoHeight;
 
         if (!vw || !vh) {
+            $('statusTxt').innerHTML = '<span class="text-amber-600">🟡 비디오 메타데이터 준비 대기 중...</span>';
             state.timer = setTimeout(loop, 200);
             return;
         }
+
+        state.isInferenceInFlight = true;
 
         // 1. Calculate aspect-preserving letterbox for inference
         const letterbox = window.CoordinateAdapter.calculateLetterbox(vw, vh, NET_SIZE, NET_SIZE);
@@ -251,7 +279,9 @@
 
         // 2. Prepare inference payload
         const blob = await new Promise(r => state.pCvs.toBlob(r, 'image/jpeg', 0.85));
-        if (!blob) {
+        if (!blob || blob.size === 0) {
+            toast("프레임 인코딩 실패 (0 바이트)", true);
+            state.isInferenceInFlight = false;
             state.timer = setTimeout(loop, 200);
             return;
         }
@@ -282,6 +312,18 @@
             const data = await res.json();
             const elapsed = Date.now() - st;
             $('statusTxt').innerHTML = `<span class="text-green-600">🟢 추론 성공 (Ping: ${elapsed}ms)</span>`;
+
+            // Coordinate Space Badge update
+            const coordBadge = $('coordSpaceBadge');
+            if (coordBadge) {
+                if (data.coordinateSpace === 'unknown') {
+                    coordBadge.className = 'text-xs font-mono bg-red-100 text-red-800 px-2.5 py-1 rounded-full font-bold animate-pulse';
+                    coordBadge.innerText = '좌표 기준 미확인 [라벨 생성 차단]';
+                } else {
+                    coordBadge.className = 'text-xs font-mono bg-blue-100 text-blue-800 px-2.5 py-1 rounded-full font-bold';
+                    coordBadge.innerText = `${data.coordinateSpace || 'Letterbox 640'} [Verified]`;
+                }
+            }
 
             const rawResults = data.results || [];
             let needRender = false;
@@ -437,9 +479,13 @@
 
         } catch (e) {
             if (e.name !== 'AbortError') {
+                state.errorCount++;
+                const errBox = $('cntError');
+                if (errBox) errBox.innerText = state.errorCount;
                 $('statusTxt').innerHTML = `<span class="text-red-500">🔴 에러: ${e.message}</span>`;
             }
         } finally {
+            state.isInferenceInFlight = false;
             state.abortController = null;
         }
 
@@ -506,6 +552,9 @@
             window.Reviewer.addRecord(record);
             toast(`스냅샷 수집 완료 (${vw}x${vh})`);
         } catch (err) {
+            state.errorCount++;
+            const errBox = $('cntError');
+            if (errBox) errBox.innerText = state.errorCount;
             console.error("Snapshot capture error:", err);
             toast("스냅샷 수집 실패", true);
         }
@@ -521,6 +570,25 @@
         // Sessions count
         const sessions = new Set(approved.map(r => r.sessionId));
 
+        // Coordinate space and boundary checks
+        let hasUnverifiedCoordSpace = false;
+        let hasOutOfBoundsBox = false;
+        let totalObjects = 0;
+
+        approved.forEach(r => {
+            if (r.coordinateSpace === 'unknown' || r.coordinateTransformStatus === 'unverified') {
+                hasUnverifiedCoordSpace = true;
+            }
+            const annotations = r.reviewedAnnotations || r.detections || [];
+            annotations.forEach(a => {
+                totalObjects++;
+                const b = a.box;
+                if (!b || b.x1 < 0 || b.y1 < 0 || b.x2 > r.originalWidth || b.y2 > r.originalHeight || b.x2 <= b.x1 || b.y2 <= b.y1) {
+                    hasOutOfBoundsBox = true;
+                }
+            });
+        });
+
         // Class distribution
         const classDist = {};
         approved.forEach(r => {
@@ -530,12 +598,25 @@
             });
         });
 
+        // Approximate train/val split preview
+        let trainImgCount = 0, valImgCount = 0;
+        if (sessions.size > 1) {
+            valImgCount = Math.max(1, Math.round(approved.length * 0.2));
+            trainImgCount = approved.length - valImgCount;
+        } else if (approved.length > 1) {
+            trainImgCount = Math.max(1, Math.round(approved.length * 0.8));
+            valImgCount = approved.length - trainImgCount;
+        } else {
+            trainImgCount = approved.length;
+            valImgCount = 0;
+        }
+
         const summaryBox = $('exportSummary');
         summaryBox.innerHTML = `
         <div class="bg-gray-50 border rounded p-3 space-y-2">
             <div class="flex justify-between font-bold">
                 <span>승인 완료 (데이터셋 포함):</span>
-                <span class="text-green-600">${approved.length}건</span>
+                <span class="text-green-600">${approved.length}건 (객체 ${totalObjects}개)</span>
             </div>
             <div class="flex justify-between font-bold text-gray-500">
                 <span>검수 대기 (제외):</span>
@@ -545,22 +626,38 @@
                 <span>반려/제외 (제외):</span>
                 <span>${rejected.length}건</span>
             </div>
-            <div class="border-t pt-2 flex justify-between font-bold">
+            <div class="border-t pt-1 flex justify-between font-bold">
+                <span>예상 분할 (Train / Val):</span>
+                <span>${trainImgCount}장 / ${valImgCount}장</span>
+            </div>
+            <div class="flex justify-between font-bold text-gray-600">
                 <span>고유 세션 수:</span>
                 <span>${sessions.size}개</span>
             </div>
         </div>
 
-        ${sessions.size <= 1 ? `
+        ${hasUnverifiedCoordSpace ? `
+        <div class="bg-red-50 border border-red-300 text-red-900 rounded p-2 text-[11px] font-bold">
+            🚨 내보내기 차단: 좌표계가 검증되지 않은(unknown) 프레임이 승인 목록에 포함되어 있습니다. 검수 센터에서 제외 처리해야 합니다.
+        </div>` : ''}
+
+        ${hasOutOfBoundsBox ? `
+        <div class="bg-red-50 border border-red-300 text-red-900 rounded p-2 text-[11px] font-bold">
+            🚨 내보내기 차단: 프레임 경계를 벗어나거나 크기가 0 이하인 비정상 박스가 존재합니다. 검수 센터에서 수정 또는 제외하세요.
+        </div>` : ''}
+
+        ${sessions.size <= 1 && !hasUnverifiedCoordSpace && !hasOutOfBoundsBox ? `
         <div class="bg-amber-50 border border-amber-300 text-amber-900 rounded p-2 text-[11px] font-bold">
             ⚠️ 단일 세션 경고: 세션이 1개뿐입니다. 인접 프레임 유사성 누수를 방지하기 위해 시계열 블록 분할(80% Train, 20% Val)이 적용됩니다.
-        </div>` : `
+        </div>` : ''}
+
+        ${sessions.size > 1 && !hasUnverifiedCoordSpace && !hasOutOfBoundsBox ? `
         <div class="bg-blue-50 border border-blue-200 text-blue-900 rounded p-2 text-[11px] font-bold">
             ✔ 다중 세션 분할: 세션 단위로 Train/Val이 완벽히 분리되어 프레임 누수가 방지됩니다.
-        </div>`}
+        </div>` : ''}
 
         <div class="border rounded p-2">
-            <div class="font-bold text-xs mb-1">클래스별 객체 수:</div>
+            <div class="font-bold text-xs mb-1">클래스별 객체 수 (고정 매핑 보존):</div>
             <div class="space-y-0.5 text-[11px]">
                 ${Object.keys(classDist).length ? Object.entries(classDist).map(([k, v]) => `
                     <div class="flex justify-between"><span>${k}</span><span class="font-bold">${v}개</span></div>
@@ -569,7 +666,7 @@
         </div>
         `;
 
-        if (approved.length === 0) {
+        if (approved.length === 0 || hasUnverifiedCoordSpace || hasOutOfBoundsBox) {
             $('btnConfirmExport').disabled = true;
             $('btnConfirmExport').classList.add('opacity-50', 'pointer-events-none');
         } else {
@@ -606,6 +703,7 @@
                 body: JSON.stringify({
                     records: approved,
                     images: imagesMap,
+                    classes: state.cls,
                 })
             });
 
@@ -634,8 +732,9 @@
         }
     };
 
-    // Initial render
+    // Initial render and page lifecycle cleanup
     renderCls();
+    window.addEventListener('beforeunload', stopOps);
     document.body.onclick = () => {
         if (speechSynthesis.getVoices().length === 0) speechSynthesis.getVoices();
     };

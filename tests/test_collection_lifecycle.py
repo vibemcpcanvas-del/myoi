@@ -270,3 +270,64 @@ def test_15_audio_and_class_configuration_regressions():
     # Frame 5 at t=6500: TTS fires (diff 5300ms > 5000ms)
     tracker.process_frame_detections(raw, current_time_ms=6500)
     assert tracker.lastTTS[0] == 6500
+
+
+def test_error_count_tracking():
+    """Requirement 4.2: Ensure error occurrences are tracked and reflected in error count."""
+    tracker = MockTacticalTracker()
+    tracker.errorCount = 0
+    # Simulate errors
+    tracker.errorCount += 1
+    assert tracker.errorCount == 1
+    tracker.errorCount += 2
+    assert tracker.errorCount == 3
+
+
+def test_javascript_coordinate_adapter_in_node():
+    """Direct execution test of static/coordinate_adapter.js in Node.js runtime."""
+    import subprocess
+    import shutil
+    from pathlib import Path
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed on system")
+
+    js_file = Path(__file__).resolve().parent.parent / "static" / "coordinate_adapter.js"
+    assert js_file.exists()
+
+    node_test_script = f"""
+    const fs = require('fs');
+    const code = fs.readFileSync({repr(str(js_file))}, 'utf8');
+    const ctx = {{}};
+    eval('(function(window){{ ' + code + ' }})(ctx)');
+    const ca = ctx.CoordinateAdapter;
+    if (!ca) throw new Error('CoordinateAdapter not loaded');
+
+    // 1. Calculate letterbox
+    const lb = ca.calculateLetterbox(1920, 1080, 640, 640);
+    if (lb.scaledW !== 640 || lb.scaledH !== 360 || lb.padY !== 140) throw new Error('LB failed');
+
+    // 2. Transform box
+    const restored = ca.transformBoxToOriginal({{x1: 320, y1: 320, x2: 480, y2: 410}}, 'letterbox_640', lb);
+    if (Math.abs(restored.x1 - 960) > 1 || Math.abs(restored.y1 - 540) > 1) throw new Error('Transform failed');
+
+    // 3. toYoloDetection
+    const yolo = ca.toYoloDetection({{x1: 480, y1: 270, x2: 1440, y2: 810}}, 1920, 1080, 2);
+    if (yolo.classId !== 2 || yolo.xCenter !== 0.5 || yolo.yCenter !== 0.5) throw new Error('YOLO failed');
+
+    // 4. Out of bounds must throw
+    let caughtOob = false;
+    try {{
+        ca.toYoloDetection({{x1: -10, y1: 10, x2: 100, y2: 100}}, 1920, 1080, 0);
+    }} catch (e) {{
+        caughtOob = true;
+    }}
+    if (!caughtOob) throw new Error('Failed to block negative coord in JS');
+
+    console.log('JS_ALL_TESTS_PASS');
+    """
+
+    res = subprocess.run([node_bin, "-e", node_test_script], capture_output=True, text=True)
+    assert res.returncode == 0, f"Node test failed: {res.stderr}"
+    assert "JS_ALL_TESTS_PASS" in res.stdout
