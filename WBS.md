@@ -48,12 +48,48 @@
 
 ---
 
-### [WBS-01] 프로젝트 코어 엔진 및 단일 실행 러너 부트스트랩 (예정)
+### [WBS-01] 보안 프록시 백엔드 및 단일 실행 러너 구축
 
-* **목표 및 범위**: `myoi` 전용 단일 엔트리포인트(`run.py`), 설정 관리, 로컬 환경 헬스체크 및 표준 패키지 구조 초기화.
+* **목표 및 범위**: 보안 프록시 API(`POST /api/predict`), 서버 환경변수 기반 키 관리, 단일 진입점 러너(`run.py`), 업스트림 통신 및 오류 격리 구축.
 * **선행 의존성**: WBS-00 [PASS]
-* **담당자**: 배정 예정
-* **산출물**: `run.py`, `pyproject.toml`, `src/`, `tests/test_runner.py`
-* **인수 기준**: `python run.py status` 정상 실행, 단위 테스트 100% PASS
-* **감사 판정**: `[PLANNED]` (선행 게이트 개방 대기)
-* **롤백 전략**: `git checkout WBS-00-PASS` 태그로 롤백
+* **담당자**: 실행자 (Antigravity Coordinator) / 감사자 (Coarena Advisor)
+* **산출물**: `run.py`, `src/server.py`, `src/config.py`, `tests/test_proxy_server.py`
+* **인수 기준**: 프런트엔드 비밀키 완전 제거, 서버 프록시 경유 추론 성공, 타임아웃 및 입력 검증, 단위 테스트 100% PASS.
+* **감사 판정**: `[IN_PROGRESS]`
+* **롤백 전략**: `git checkout HEAD -- run.py src/ tests/test_proxy_server.py`
+
+---
+
+### [WBS-02] 종횡비 보존 Letterbox 및 좌표 변환 어댑터 구현
+
+* **목표 및 범위**: 원본 해상도 보존 Letterbox 변환기, 다중 좌표계(`letterbox_640`, `original`, `normalized`, `unknown`) 어댑터 및 경계 제한·검증 로직 구현.
+* **선행 의존성**: WBS-01 [PASS]
+* **담당자**: 실행자 (Antigravity Coordinator) / 감사자 (Coarena Advisor)
+* **산출물**: `src/coordinate_adapter.py`, `tests/test_coordinate_adapter.py`
+* **인수 기준**: 1920x1080, 640x480, 1080x1920 비율 보존, 역변환 픽셀 정확도 검증, unknown 좌표계 차단, 단위 테스트 100% PASS.
+* **감사 판정**: `[PLANNED]`
+* **롤백 전략**: `git checkout HEAD -- src/coordinate_adapter.py tests/test_coordinate_adapter.py`
+
+---
+
+### [WBS-03] SCHALE 스트리밍 스냅샷 수집·검수·YOLO 내보내기 웹앱 구현
+
+* **목표 및 범위**: SCHALE 블루아카이브 스타일 UI 개선, 화면 잘림 방지 `contain` 뷰포트, 스냅샷 수집 트리거 및 쿨다운, 인터랙티브 검수 에디터, Ultralytics YOLO detect ZIP 패키징.
+* **선행 의존성**: WBS-02 [PASS]
+* **담당자**: 실행자 (Antigravity Coordinator) / 감사자 (Coarena Advisor)
+* **산출물**: `static/index.html`, `static/app.js`, `static/coordinate_adapter.js`, `static/reviewer.js`, `static/yolo_exporter.js`
+* **인수 기준**: 기존 기능(화면공유, 비프, TTS 등) 무회귀, 원본 해상도 스냅샷 보존, 검수 미완료/제외 항목 ZIP 누락 차단, 세션 단위 split.
+* **감사 판정**: `[PLANNED]`
+* **롤백 전략**: `git checkout HEAD -- static/`
+
+---
+
+### [WBS-04] 15대 필수 요구사항 검증 테스트 스위트 및 불변식 검증
+
+* **목표 및 범위**: 명세서에 규정된 15대 필수 테스트 항목 자동화 구현, 거버넌스 불변식 및 Fail-Closed 검증, 전수 PASS 확인.
+* **선행 의존성**: WBS-03 [PASS]
+* **담당자**: 실행자 (Antigravity Coordinator) / 감사자 (Coarena Advisor)
+* **산출물**: `tests/test_yolo_export.py`, `tests/test_collection_lifecycle.py`, `docs/VERIFICATION_REPORT.md`
+* **인수 기준**: 15대 필수 테스트 전 항목 100% PASS, 거버넌스 불변식 100% PASS, 실제 산출물 전수 육안/해시 검증.
+* **감사 판정**: `[PLANNED]`
+* **롤백 전략**: `git checkout HEAD -- tests/ docs/`
