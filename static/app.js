@@ -1,0 +1,642 @@
+/**
+ * static/app.js
+ * SCHALE Tactical Tracking - Main Application Logic
+ * Integrates stream capture, aspect-preserving letterbox inference,
+ * snapshot collection, and human review verification.
+ */
+
+(function () {
+    'use strict';
+
+    const $ = id => document.getElementById(id);
+    const toast = (msg, err) => {
+        const d = document.createElement('div');
+        d.className = `toast ${err ? 'border-red-500 text-red-600' : 'text-gray-800'}`;
+        d.innerHTML = msg;
+        $('toastBox').appendChild(d);
+        setTimeout(() => d.remove(), 3500);
+    };
+
+    const COLORS = ["#eab308", "#ef4444", "#3b82f6", "#a855f7", "#22c55e", "#f97316", "#06b6d4", "#ec4899"];
+    const NET_SIZE = 640;
+
+    // Application state
+    window.AppState = {
+        stream: null,
+        timer: null,
+        abortController: null,
+        isRunning: false,
+        cls: JSON.parse(localStorage.getItem('schale_cls_v3') || '{}'),
+        lastTTS: {},
+        lastBeep: 0,
+        sessionId: generateSessionId(),
+        lastSnapshotTime: 0,
+        // Offscreen canvases
+        pCvs: document.createElement('canvas'), // 640x640 letterbox canvas for inference
+        origCvs: document.createElement('canvas'), // full resolution clean original canvas
+        prevCvs: document.createElement('canvas'), // full resolution preview canvas
+    };
+    const state = window.AppState;
+    state.pCvs.width = state.pCvs.height = NET_SIZE;
+    const pCtx = state.pCvs.getContext('2d');
+    const origCtx = state.origCvs.getContext('2d');
+    const prevCtx = state.prevCvs.getContext('2d');
+
+    // Initialize Reviewer
+    window.Reviewer = new window.ReviewManager();
+
+    function generateSessionId() {
+        const d = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        return `SES_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    }
+
+    $('txtSessionId').innerText = state.sessionId;
+
+    // --- Web Audio API (Beep Sound Generator) ---
+    let audioCtx;
+    const playBeep = () => {
+        try {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.15);
+
+            gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
+
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.15);
+        } catch (e) {
+            console.warn("Audio playback not allowed:", e);
+        }
+    };
+
+    // --- UI Event Bindings ---
+    $('iConf').oninput = e => $('vConf').innerText = Number(e.target.value).toFixed(2);
+    $('iFrame').oninput = e => $('vFrame').innerText = e.target.value;
+    $('iCooldown').oninput = e => $('vCooldown').innerText = Number(e.target.value).toFixed(1) + 's';
+    $('chkHideVid').onchange = e => { $('vid').style.opacity = e.target.checked ? '0' : '1'; };
+
+    $('btnReset').onclick = () => {
+        state.cls = {};
+        saveCls();
+        renderCls();
+        toast("클래스 목록 초기화됨");
+    };
+
+    $('btnNewSession').onclick = () => {
+        state.sessionId = generateSessionId();
+        $('txtSessionId').innerText = state.sessionId;
+        toast(`새 세션 시작: ${state.sessionId}`);
+    };
+
+    $('btnClearSession').onclick = () => {
+        if (confirm("현재 세션에 수집된 프레임을 모두 버리시겠습니까?")) {
+            window.Reviewer.clearRecords();
+            state.sessionId = generateSessionId();
+            $('txtSessionId').innerText = state.sessionId;
+            toast("세션 및 수집 데이터 초기화됨");
+        }
+    };
+
+    // --- Class Configuration Management ---
+    const saveCls = () => localStorage.setItem('schale_cls_v3', JSON.stringify(state.cls));
+    const renderCls = () => {
+        const box = $('classList');
+        const keys = Object.keys(state.cls);
+        if (!keys.length) {
+            box.innerHTML = '<div class="pt-2">API 감지 시 클래스가 자동 등록됩니다.</div>';
+            return;
+        }
+
+        box.innerHTML = keys.sort((a, b) => a - b).map(k => {
+            const c = state.cls[k];
+            return `
+            <div class="bg-gray-50 border p-2 rounded text-xs flex flex-col gap-1.5" data-id="${k}">
+                <div class="flex justify-between font-bold border-b pb-1">
+                    <span style="color:${COLORS[k % COLORS.length]}">[${k}] ${c.name}</span>
+                    <label class="ba-check flex items-center"><input type="checkbox" class="t-on" ${c.on ? 'checked' : ''}><span class="chk m-0 w-[14px] h-[14px]"></span></label>
+                </div>
+                <div class="flex justify-between items-center ${c.on ? '' : 'opacity-30 pointer-events-none'}">
+                    <label class="ba-check flex items-center"><input type="checkbox" class="t-alt" ${c.alt ? 'checked' : ''}><span class="chk w-[14px] h-[14px]"></span><span class="text-[10px]">경고</span></label>
+                    <div class="flex items-center gap-1">
+                        <span class="text-[10px] text-gray-500">Conf:</span>
+                        <input type="number" class="t-cnf w-12 border p-0.5 text-center text-xs" step="0.05" min="0.01" max="1" value="${c.cnf}">
+                    </div>
+                </div>
+            </div>`;
+        }).join('');
+    };
+
+    $('classList').onchange = e => {
+        const p = e.target.closest('[data-id]');
+        if (!p) return;
+        const id = p.dataset.id;
+        if (e.target.classList.contains('t-on')) state.cls[id].on = e.target.checked;
+        if (e.target.classList.contains('t-alt')) state.cls[id].alt = e.target.checked;
+        if (e.target.classList.contains('t-cnf')) state.cls[id].cnf = parseFloat(e.target.value);
+        saveCls();
+        renderCls();
+    };
+
+    // --- Screen Share / Operation Control ---
+    $('btnShare').onclick = async () => {
+        if (!state.stream) {
+            try {
+                state.stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+                $('vid').srcObject = state.stream;
+                $('overlayStandby').style.display = 'none';
+                $('btnShare').querySelector('span').innerText = "연결 해제";
+                $('btnStart').classList.remove('hidden');
+
+                const track = state.stream.getVideoTracks()[0];
+                track.onended = stopOps;
+
+                $('vid').onloadedmetadata = () => {
+                    const vw = $('vid').videoWidth;
+                    const vh = $('vid').videoHeight;
+                    $('resolutionInfo').innerText = `해상도: ${vw}x${vh} (원본 유지)`;
+                };
+            } catch (e) {
+                toast("화면 공유 취소됨", true);
+            }
+        } else {
+            state.stream.getTracks().forEach(t => t.stop());
+            stopOps();
+        }
+    };
+
+    const stopOps = () => {
+        state.isRunning = false;
+        clearTimeout(state.timer);
+        if (state.abortController) {
+            state.abortController.abort();
+            state.abortController = null;
+        }
+
+        if (state.stream) {
+            state.stream.getTracks().forEach(t => t.stop());
+            state.stream = null;
+        }
+
+        $('vid').srcObject = null;
+        $('overlayStandby').style.display = 'flex';
+        $('btnShare').querySelector('span').innerText = "화면 공유";
+        $('btnStart').classList.remove('hidden');
+        $('btnStop').classList.add('hidden');
+        $('statusTxt').innerText = "연결이 해제되었습니다.";
+        $('resolutionInfo').innerText = "해상도: 대기 중";
+        $('videoWrap').classList.remove('alert');
+        $('alertBanner').style.opacity = '0';
+
+        const cvs = $('cvs');
+        cvs.getContext('2d').clearRect(0, 0, cvs.width, cvs.height);
+    };
+
+    $('btnStart').onclick = () => {
+        if (!state.stream) {
+            toast("화면 공유를 먼저 시작하세요.", true);
+            return;
+        }
+        state.isRunning = true;
+        $('btnStart').classList.add('hidden');
+        $('btnStop').classList.remove('hidden');
+        toast("클라우드 자동 작전 개시");
+        loop();
+    };
+
+    $('btnStop').onclick = () => {
+        state.isRunning = false;
+        clearTimeout(state.timer);
+        if (state.abortController) {
+            state.abortController.abort();
+            state.abortController = null;
+        }
+        $('btnStart').classList.remove('hidden');
+        $('btnStop').classList.add('hidden');
+        $('statusTxt').innerText = "작전 중지됨.";
+        $('videoWrap').classList.remove('alert');
+        $('alertBanner').style.opacity = '0';
+        const cvs = $('cvs');
+        cvs.getContext('2d').clearRect(0, 0, cvs.width, cvs.height);
+    };
+
+    // --- Inference & Drawing Loop ---
+    const loop = async () => {
+        if (!state.isRunning || !state.stream) return;
+
+        const vw = $('vid').videoWidth;
+        const vh = $('vid').videoHeight;
+
+        if (!vw || !vh) {
+            state.timer = setTimeout(loop, 200);
+            return;
+        }
+
+        // 1. Calculate aspect-preserving letterbox for inference
+        const letterbox = window.CoordinateAdapter.calculateLetterbox(vw, vh, NET_SIZE, NET_SIZE);
+
+        // Draw letterbox onto 640x640 canvas (neutral padding)
+        pCtx.fillStyle = '#727272';
+        pCtx.fillRect(0, 0, NET_SIZE, NET_SIZE);
+        pCtx.drawImage($('vid'), letterbox.padX, letterbox.padY, letterbox.scaledW, letterbox.scaledH);
+
+        // 2. Prepare inference payload
+        const blob = await new Promise(r => state.pCvs.toBlob(r, 'image/jpeg', 0.85));
+        if (!blob) {
+            state.timer = setTimeout(loop, 200);
+            return;
+        }
+
+        const fd = new FormData();
+        fd.append("file", blob, "frame.jpg");
+        fd.append("imgsz", NET_SIZE);
+        fd.append("coordinateSpace", "letterbox_640");
+
+        state.abortController = new AbortController();
+        const st = Date.now();
+
+        try {
+            // Call same-origin backend proxy
+            const res = await fetch("/api/predict", {
+                method: "POST",
+                body: fd,
+                signal: state.abortController.signal
+            });
+
+            if (!state.isRunning) return; // discarded after stop
+
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.detail?.message || `HTTP ${res.status}`);
+            }
+
+            const data = await res.json();
+            const elapsed = Date.now() - st;
+            $('statusTxt').innerHTML = `<span class="text-green-600">🟢 추론 성공 (Ping: ${elapsed}ms)</span>`;
+
+            const rawResults = data.results || [];
+            let needRender = false;
+
+            // Register detected classes
+            rawResults.forEach(r => {
+                if (!state.cls[r.class]) {
+                    state.cls[r.class] = {
+                        name: r.name || `C${r.class}`,
+                        on: true,
+                        alt: true,
+                        cnf: parseFloat($('iConf').value),
+                        count: 0
+                    };
+                    needRender = true;
+                }
+            });
+            if (needRender) {
+                saveCls();
+                renderCls();
+            }
+
+            // 3. Align Canvas Overlay to Contain-Mode Video Rect
+            const videoWrap = $('videoWrap');
+            const wrapW = videoWrap.clientWidth;
+            const wrapH = videoWrap.clientHeight;
+            const cvs = $('cvs');
+            if (cvs.width !== wrapW || cvs.height !== wrapH) {
+                cvs.width = wrapW;
+                cvs.height = wrapH;
+            }
+
+            const ctx = cvs.getContext('2d');
+            ctx.clearRect(0, 0, wrapW, wrapH);
+
+            // Compute video containment viewport inside wrap
+            const streamAspect = vw / vh;
+            const wrapAspect = wrapW / wrapH;
+            let renderW, renderH, offsetX, offsetY;
+
+            if (wrapAspect > streamAspect) {
+                // Pillared horizontally
+                renderH = wrapH;
+                renderW = wrapH * streamAspect;
+                offsetX = (wrapW - renderW) / 2;
+                offsetY = 0;
+            } else {
+                // Letterboxed vertically
+                renderW = wrapW;
+                renderH = wrapW / streamAspect;
+                offsetX = 0;
+                offsetY = (wrapH - renderH) / 2;
+            }
+
+            const renderScaleX = renderW / vw;
+            const renderScaleY = renderH / vh;
+
+            const thFrames = parseInt($('iFrame').value);
+            let hasAlert = false;
+            const seen = new Set();
+            const now = Date.now();
+            const validDetectionsForCollection = [];
+
+            rawResults.forEach(r => {
+                const c = state.cls[r.class];
+                if (!c || !c.on || r.confidence < c.cnf) return;
+
+                seen.add(r.class);
+                c.count = (c.count || 0) + 1;
+                const isConf = c.count >= thFrames;
+
+                // Transform box coordinates to original frame pixel space
+                let origBox;
+                try {
+                    origBox = window.CoordinateAdapter.transformBoxToOriginal(
+                        r.box,
+                        data.coordinateSpace || "letterbox_640",
+                        letterbox
+                    );
+                } catch (e) {
+                    console.warn("Coordinate conversion skipped:", e);
+                    return;
+                }
+
+                if (isConf) {
+                    validDetectionsForCollection.push({
+                        classId: r.class,
+                        className: c.name,
+                        confidence: r.confidence,
+                        box: origBox
+                    });
+                }
+
+                if (isConf && c.alt) {
+                    hasAlert = true;
+
+                    // Beep alert (Global cooldown 2s)
+                    if ($('chkBeep').checked && (now - state.lastBeep > 2000)) {
+                        state.lastBeep = now;
+                        playBeep();
+                    }
+
+                    // TTS alert (Per-class cooldown 5s)
+                    if ($('chkTTS').checked && (now - (state.lastTTS[r.class] || 0) > 5000)) {
+                        state.lastTTS[r.class] = now;
+                        const u = new SpeechSynthesisUtterance(`경고. ${c.name}.`);
+                        u.lang = 'ko-KR';
+                        u.rate = 1.2;
+                        speechSynthesis.speak(u);
+                    }
+                }
+
+                // Draw overlay box on display viewport
+                const color = COLORS[r.class % COLORS.length];
+                const dx = offsetX + origBox.x1 * renderScaleX;
+                const dy = offsetY + origBox.y1 * renderScaleY;
+                const dw = origBox.width * renderScaleX;
+                const dh = origBox.height * renderScaleY;
+
+                ctx.strokeStyle = color;
+                ctx.lineWidth = Math.max(2, wrapW / 400);
+                ctx.strokeRect(dx, dy, dw, dh);
+                ctx.fillStyle = color;
+                ctx.font = `bold ${Math.max(12, wrapW / 70)}px sans-serif`;
+                ctx.fillText(`${c.name} ${(r.confidence * 100).toFixed(0)}%`, dx, dy - 5);
+            });
+
+            // Reset counts for unseen classes
+            Object.keys(state.cls).forEach(k => {
+                if (!seen.has(Number(k))) state.cls[k].count = 0;
+            });
+
+            $('videoWrap').classList.toggle('alert', hasAlert);
+            $('alertBanner').style.opacity = hasAlert ? '1' : '0';
+
+            // 4. Data Collection Snapshot Trigger
+            if ($('chkCollect').checked && validDetectionsForCollection.length > 0) {
+                const cooldownSec = parseFloat($('iCooldown').value);
+                const cooldownMs = cooldownSec * 1000;
+
+                if (now - state.lastSnapshotTime >= cooldownMs) {
+                    state.lastSnapshotTime = now;
+                    $('cooldownIndicator').innerText = "스냅샷 캡처 중...";
+                    await captureSnapshot(vw, vh, validDetectionsForCollection);
+                    $('cooldownIndicator').innerText = `쿨다운 중 (${cooldownSec}s)`;
+                } else {
+                    const remaining = ((cooldownMs - (now - state.lastSnapshotTime)) / 1000).toFixed(1);
+                    $('cooldownIndicator').innerText = `중복 억제 활성: 잔여 쿨다운 ${remaining}s`;
+                }
+            } else if ($('chkCollect').checked) {
+                $('cooldownIndicator').innerText = "수집 조건 대기 중 (신뢰도/연속프레임 충족 시)";
+            }
+
+        } catch (e) {
+            if (e.name !== 'AbortError') {
+                $('statusTxt').innerHTML = `<span class="text-red-500">🔴 에러: ${e.message}</span>`;
+            }
+        } finally {
+            state.abortController = null;
+        }
+
+        state.timer = setTimeout(loop, 200);
+    };
+
+    // --- High-Resolution Snapshot Capture ---
+    async function captureSnapshot(vw, vh, detections) {
+        try {
+            // 1. Capture clean unannotated original frame
+            state.origCvs.width = vw;
+            state.origCvs.height = vh;
+            origCtx.drawImage($('vid'), 0, 0, vw, vh);
+            const origBlob = await new Promise(r => state.origCvs.toBlob(r, 'image/jpeg', 0.95));
+            const origBase64 = state.origCvs.toDataURL('image/jpeg', 0.95);
+
+            // 2. Capture preview frame with boxes for review convenience
+            state.prevCvs.width = vw;
+            state.prevCvs.height = vh;
+            prevCtx.drawImage(state.origCvs, 0, 0);
+
+            detections.forEach(d => {
+                const b = d.box;
+                const color = COLORS[(d.classId || 0) % COLORS.length];
+                prevCtx.strokeStyle = color;
+                prevCtx.lineWidth = Math.max(3, vw / 300);
+                prevCtx.strokeRect(b.x1, b.y1, b.width, b.height);
+                prevCtx.fillStyle = color;
+                prevCtx.font = `bold ${Math.max(16, vw / 60)}px sans-serif`;
+                prevCtx.fillText(`${d.className} ${(d.confidence * 100).toFixed(0)}%`, b.x1, Math.max(24, b.y1 - 6));
+            });
+
+            const prevBlob = await new Promise(r => state.prevCvs.toBlob(r, 'image/jpeg', 0.85));
+            const prevBase64 = state.prevCvs.toDataURL('image/jpeg', 0.85);
+
+            const recId = `rec_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+            const timestampUtc = new Date().toISOString();
+
+            const record = {
+                schemaVersion: "1.0.0",
+                recordId: recId,
+                sessionId: state.sessionId,
+                imageFile: `images/${recId}_orig.jpg`,
+                previewFile: `previews/${recId}_prev.jpg`,
+                capturedAtUtc: timestampUtc,
+                originalWidth: vw,
+                originalHeight: vh,
+                inferenceWidth: NET_SIZE,
+                inferenceHeight: NET_SIZE,
+                model: "ultralytics-yolo-v8",
+                coordinateSpace: "letterbox_640",
+                coordinateTransformStatus: "verified",
+                detections: detections,
+                reviewedAnnotations: JSON.parse(JSON.stringify(detections)),
+                reviewStatus: "pending",
+                reviewedAtUtc: null,
+                reviewerId: "Sensei",
+                origBlob: origBlob,
+                prevBlob: prevBlob,
+                origBase64: origBase64,
+                prevBase64: prevBase64,
+            };
+
+            window.Reviewer.addRecord(record);
+            toast(`스냅샷 수집 완료 (${vw}x${vh})`);
+        } catch (err) {
+            console.error("Snapshot capture error:", err);
+            toast("스냅샷 수집 실패", true);
+        }
+    }
+
+    // --- YOLO ZIP Export Modal & Download ---
+    $('btnExportZip').onclick = () => {
+        const records = window.Reviewer.records;
+        const approved = records.filter(r => r.reviewStatus === 'approved');
+        const pending = records.filter(r => r.reviewStatus === 'pending');
+        const rejected = records.filter(r => r.reviewStatus === 'rejected');
+
+        // Sessions count
+        const sessions = new Set(approved.map(r => r.sessionId));
+
+        // Class distribution
+        const classDist = {};
+        approved.forEach(r => {
+            (r.reviewedAnnotations || r.detections || []).forEach(a => {
+                const name = a.className || `Class ${a.classId}`;
+                classDist[name] = (classDist[name] || 0) + 1;
+            });
+        });
+
+        const summaryBox = $('exportSummary');
+        summaryBox.innerHTML = `
+        <div class="bg-gray-50 border rounded p-3 space-y-2">
+            <div class="flex justify-between font-bold">
+                <span>승인 완료 (데이터셋 포함):</span>
+                <span class="text-green-600">${approved.length}건</span>
+            </div>
+            <div class="flex justify-between font-bold text-gray-500">
+                <span>검수 대기 (제외):</span>
+                <span>${pending.length}건</span>
+            </div>
+            <div class="flex justify-between font-bold text-gray-500">
+                <span>반려/제외 (제외):</span>
+                <span>${rejected.length}건</span>
+            </div>
+            <div class="border-t pt-2 flex justify-between font-bold">
+                <span>고유 세션 수:</span>
+                <span>${sessions.size}개</span>
+            </div>
+        </div>
+
+        ${sessions.size <= 1 ? `
+        <div class="bg-amber-50 border border-amber-300 text-amber-900 rounded p-2 text-[11px] font-bold">
+            ⚠️ 단일 세션 경고: 세션이 1개뿐입니다. 인접 프레임 유사성 누수를 방지하기 위해 시계열 블록 분할(80% Train, 20% Val)이 적용됩니다.
+        </div>` : `
+        <div class="bg-blue-50 border border-blue-200 text-blue-900 rounded p-2 text-[11px] font-bold">
+            ✔ 다중 세션 분할: 세션 단위로 Train/Val이 완벽히 분리되어 프레임 누수가 방지됩니다.
+        </div>`}
+
+        <div class="border rounded p-2">
+            <div class="font-bold text-xs mb-1">클래스별 객체 수:</div>
+            <div class="space-y-0.5 text-[11px]">
+                ${Object.keys(classDist).length ? Object.entries(classDist).map(([k, v]) => `
+                    <div class="flex justify-between"><span>${k}</span><span class="font-bold">${v}개</span></div>
+                `).join('') : '<div class="text-gray-400">승인된 객체 없음</div>'}
+            </div>
+        </div>
+        `;
+
+        if (approved.length === 0) {
+            $('btnConfirmExport').disabled = true;
+            $('btnConfirmExport').classList.add('opacity-50', 'pointer-events-none');
+        } else {
+            $('btnConfirmExport').disabled = false;
+            $('btnConfirmExport').classList.remove('opacity-50', 'pointer-events-none');
+        }
+
+        $('exportModal').classList.remove('hidden');
+    };
+
+    $('btnCloseExport').onclick = () => $('exportModal').classList.add('hidden');
+    $('btnCancelExport').onclick = () => $('exportModal').classList.add('hidden');
+
+    $('btnConfirmExport').onclick = async () => {
+        const approved = window.Reviewer.records.filter(r => r.reviewStatus === 'approved');
+        if (approved.length === 0) {
+            toast("승인 완료된 프레임이 없습니다.", true);
+            return;
+        }
+
+        $('btnConfirmExport').disabled = true;
+        $('btnConfirmExport').querySelector('span').innerText = "ZIP 생성 중...";
+
+        try {
+            // Build payload for server-side exporter
+            const imagesMap = {};
+            approved.forEach(r => {
+                imagesMap[r.imageFile] = r.origBase64;
+            });
+
+            const res = await fetch("/api/export-yolo", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    records: approved,
+                    images: imagesMap,
+                })
+            });
+
+            if (!res.ok) {
+                const errJson = await res.json().catch(() => ({}));
+                throw new Error(errJson.detail?.message || `HTTP ${res.status}`);
+            }
+
+            const blob = await res.blob();
+            const downloadUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = downloadUrl;
+            a.download = `schale_yolo_dataset_${Date.now()}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(downloadUrl);
+
+            $('exportModal').classList.add('hidden');
+            toast("YOLO 데이터셋 ZIP 다운로드 완료!");
+        } catch (e) {
+            alert(`ZIP 생성 실패: ${e.message}`);
+        } finally {
+            $('btnConfirmExport').disabled = false;
+            $('btnConfirmExport').querySelector('span').innerText = "ZIP 다운로드 실행";
+        }
+    };
+
+    // Initial render
+    renderCls();
+    document.body.onclick = () => {
+        if (speechSynthesis.getVoices().length === 0) speechSynthesis.getVoices();
+    };
+})();

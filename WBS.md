@@ -55,7 +55,7 @@
 * **담당자**: 실행자 (Antigravity Coordinator) / 감사자 (Coarena Advisor)
 * **산출물**: `run.py`, `src/server.py`, `src/config.py`, `tests/test_proxy_server.py`
 * **인수 기준**: 프런트엔드 비밀키 완전 제거, 서버 프록시 경유 추론 성공, 타임아웃 및 입력 검증, 단위 테스트 100% PASS.
-* **감사 판정**: `[IN_PROGRESS]`
+* **감사 판정**: `[PASS]`
 * **롤백 전략**: `git checkout HEAD -- run.py src/ tests/test_proxy_server.py`
 
 ---
@@ -67,7 +67,7 @@
 * **담당자**: 실행자 (Antigravity Coordinator) / 감사자 (Coarena Advisor)
 * **산출물**: `src/coordinate_adapter.py`, `tests/test_coordinate_adapter.py`
 * **인수 기준**: 1920x1080, 640x480, 1080x1920 비율 보존, 역변환 픽셀 정확도 검증, unknown 좌표계 차단, 단위 테스트 100% PASS.
-* **감사 판정**: `[PLANNED]`
+* **감사 판정**: `[PASS]`
 * **롤백 전략**: `git checkout HEAD -- src/coordinate_adapter.py tests/test_coordinate_adapter.py`
 
 ---
@@ -77,10 +77,10 @@
 * **목표 및 범위**: SCHALE 블루아카이브 스타일 UI 개선, 화면 잘림 방지 `contain` 뷰포트, 스냅샷 수집 트리거 및 쿨다운, 인터랙티브 검수 에디터, Ultralytics YOLO detect ZIP 패키징.
 * **선행 의존성**: WBS-02 [PASS]
 * **담당자**: 실행자 (Antigravity Coordinator) / 감사자 (Coarena Advisor)
-* **산출물**: `static/index.html`, `static/app.js`, `static/coordinate_adapter.js`, `static/reviewer.js`, `static/yolo_exporter.js`
+* **산출물**: `static/index.html`, `static/app.js`, `static/coordinate_adapter.js`, `static/reviewer.js`, `src/yolo_exporter.py`
 * **인수 기준**: 기존 기능(화면공유, 비프, TTS 등) 무회귀, 원본 해상도 스냅샷 보존, 검수 미완료/제외 항목 ZIP 누락 차단, 세션 단위 split.
-* **감사 판정**: `[PLANNED]`
-* **롤백 전략**: `git checkout HEAD -- static/`
+* **감사 판정**: `[PASS]`
+* **롤백 전략**: `git checkout HEAD -- static/ src/yolo_exporter.py`
 
 ---
 
@@ -91,5 +91,5 @@
 * **담당자**: 실행자 (Antigravity Coordinator) / 감사자 (Coarena Advisor)
 * **산출물**: `tests/test_yolo_export.py`, `tests/test_collection_lifecycle.py`, `docs/VERIFICATION_REPORT.md`
 * **인수 기준**: 15대 필수 테스트 전 항목 100% PASS, 거버넌스 불변식 100% PASS, 실제 산출물 전수 육안/해시 검증.
-* **감사 판정**: `[PLANNED]`
+* **감사 판정**: `[PASS]`
 * **롤백 전략**: `git checkout HEAD -- tests/ docs/`
