@@ -1,6 +1,8 @@
 """src/server.py
 FastAPI Server and Security Proxy for SCHALE Tactical Tracking.
 Provides same-origin /api/predict proxy to keep upstream cloud API credentials secure on the server.
+Cross-cutting concerns (Redaction, Circuit Breaker, Telemetry, and Invariants)
+are decoupled using Aspect-Oriented Programming (AOP).
 """
 
 from contextlib import asynccontextmanager
@@ -14,6 +16,19 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
 
+from src.aspects.circuit_breaker import (
+    circuit_breaker,
+    default_inference_circuit_breaker,
+)
+from src.aspects.redaction import (
+    get_global_redactor,
+    redact_secrets,
+    SecretRedactionMiddleware,
+)
+from src.aspects.telemetry import (
+    default_telemetry_collector,
+    measure_telemetry,
+)
 from src.config import AppConfig, get_config
 from src.multipart_parser import parse_multipart_body
 from src.yolo_exporter import validate_and_build_yolo_dataset
@@ -34,6 +49,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# AOP Aspect 1: Secret Redaction Middleware
+app.add_middleware(SecretRedactionMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,28 +63,131 @@ app.add_middleware(
 
 @app.get("/health")
 @app.get("/api/status")
+@measure_telemetry(metric_name="health_check")
 async def get_system_status() -> Dict[str, Any]:
     """Health check endpoint.
-    Reports server status and whether API key is configured without leaking the key.
+    Reports server status, API key status, operational telemetry,
+    and circuit breaker health without leaking sensitive credentials.
     """
     config = get_config()
+    redactor = get_global_redactor()
+    sanitized_upstream = redactor.redact_text(config.inference_api_url.split("?")[0])
+
     return {
         "status": "online",
         "service": "SCHALE Tactical Tracking Server",
         "version": "1.0.0",
         "apiConfigured": config.is_api_key_configured,
         "mockMode": config.mock_inference,
-        "upstreamEndpoint": config.inference_api_url.split("?")[0],  # sanitized
+        "upstreamEndpoint": sanitized_upstream,
         "defaultCoordinateSpace": "letterbox_640",
+        "circuitBreaker": default_inference_circuit_breaker.get_telemetry(),
+        "telemetry": default_telemetry_collector.get_metrics(),
     }
 
 
+async def _execute_upstream_inference(
+    config: AppConfig,
+    filename: str,
+    file_bytes: bytes,
+    file_mime: str,
+    imgsz: int,
+    conf: Optional[float],
+    iou: Optional[float],
+) -> Dict[str, Any]:
+    """Helper that handles network execution to upstream cloud inference API.
+    Protected by circuit breaker and secret redaction aspects.
+    """
+    headers = {
+        "Authorization": f"Bearer {config.inference_api_key}",
+    }
+    files = {
+        "file": (filename, file_bytes, file_mime),
+    }
+    data: Dict[str, str] = {
+        "imgsz": str(imgsz),
+    }
+    if conf is not None:
+        data["conf"] = str(conf)
+    if iou is not None:
+        data["iou"] = str(iou)
+
+    try:
+        async with httpx.AsyncClient(timeout=config.request_timeout_sec) as client:
+            upstream_resp = await client.post(
+                config.inference_api_url,
+                headers=headers,
+                files=files,
+                data=data,
+            )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={
+                "error": "upstream_timeout",
+                "message": f"Upstream inference request timed out after {config.request_timeout_sec}s.",
+            },
+        )
+    except httpx.RequestError:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "error": "upstream_connection_failed",
+                "message": "Failed to connect to upstream inference server.",
+            },
+        )
+
+    if upstream_resp.status_code != 200:
+        try:
+            upstream_err = upstream_resp.json()
+            err_msg = upstream_err.get("message") or upstream_err.get("error") or "Upstream inference error"
+        except Exception:
+            err_msg = f"Upstream returned HTTP {upstream_resp.status_code}"
+
+        # Error redaction aspect
+        redactor = get_global_redactor()
+        sanitized_msg = redactor.redact_text(str(err_msg))
+
+        raise HTTPException(
+            status_code=(
+                upstream_resp.status_code
+                if upstream_resp.status_code in (400, 401, 403, 500)
+                else status.HTTP_502_BAD_GATEWAY
+            ),
+            detail={
+                "error": "upstream_api_error",
+                "message": sanitized_msg,
+                "upstreamStatus": upstream_resp.status_code,
+            },
+        )
+
+    try:
+        upstream_data = upstream_resp.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "error": "invalid_upstream_json",
+                "message": "Upstream response was not valid JSON.",
+            },
+        )
+
+    return upstream_data
+
+
 @app.post("/api/predict")
+@measure_telemetry(metric_name="api_predict", inject_ping=True)
+@redact_secrets()
+@circuit_breaker(breaker=default_inference_circuit_breaker)
 async def predict_proxy(request: Request) -> Dict[str, Any]:
     """Proxy endpoint for inference.
     Receives an image file from the frontend (multipart/form-data or raw octet-stream),
     relays it to upstream cloud inference API with server-side credentials,
     and returns standardized detection results.
+    AOP Aspects applied:
+      - @measure_telemetry: tracks execution duration, updates telemetry stats, injects pingMs
+      - @redact_secrets: intercepts any exception details or responses to scrub credentials
+      - @circuit_breaker: provides fail-closed isolation on 401/403 or repeated upstream failures
     """
     config = get_config()
     content_type_header = request.headers.get("content-type", "")
@@ -77,6 +198,8 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
     imgsz: int = 640
     coordinate_space: str = "letterbox_640"
     is_mock: bool = config.mock_inference
+    conf: Optional[float] = None
+    iou: Optional[float] = None
 
     # 1. Parse request body
     body_bytes = await request.body()
@@ -113,7 +236,6 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
             except ValueError:
                 pass
 
-        conf: Optional[float] = None
         if "conf" in form_data.fields:
             try:
                 parsed_conf = float(form_data.fields["conf"])
@@ -122,7 +244,6 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
             except ValueError:
                 pass
 
-        iou: Optional[float] = None
         if "iou" in form_data.fields:
             try:
                 parsed_iou = float(form_data.fields["iou"])
@@ -140,8 +261,6 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
         file_bytes = body_bytes
         file_mime = content_type_header
         filename = "stream_frame.jpg"
-        conf = None
-        iou = None
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -199,78 +318,15 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
         )
 
     # 4. Proxy request to upstream cloud inference API
-    start_time = time.time()
-    headers = {
-        "Authorization": f"Bearer {config.inference_api_key}",
-    }
-    files = {
-        "file": (filename, file_bytes, file_mime),
-    }
-    data: Dict[str, str] = {
-        "imgsz": str(imgsz),
-    }
-    if conf is not None:
-        data["conf"] = str(conf)
-    if iou is not None:
-        data["iou"] = str(iou)
-
-    try:
-        async with httpx.AsyncClient(timeout=config.request_timeout_sec) as client:
-            upstream_resp = await client.post(
-                config.inference_api_url,
-                headers=headers,
-                files=files,
-                data=data,
-            )
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail={
-                "error": "upstream_timeout",
-                "message": f"Upstream inference request timed out after {config.request_timeout_sec}s.",
-            },
-        )
-    except httpx.RequestError:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={
-                "error": "upstream_connection_failed",
-                "message": "Failed to connect to upstream inference server.",
-            },
-        )
-
-    elapsed_ms = round((time.time() - start_time) * 1000, 2)
-
-    if upstream_resp.status_code != 200:
-        try:
-            upstream_err = upstream_resp.json()
-            err_msg = upstream_err.get("message") or upstream_err.get("error") or "Upstream inference error"
-        except Exception:
-            err_msg = f"Upstream returned HTTP {upstream_resp.status_code}"
-
-        sanitized_msg = str(err_msg)
-        if config.inference_api_key and config.inference_api_key in sanitized_msg:
-            sanitized_msg = sanitized_msg.replace(config.inference_api_key, "[REDACTED]")
-
-        raise HTTPException(
-            status_code=upstream_resp.status_code if upstream_resp.status_code in (400, 401, 403, 500) else status.HTTP_502_BAD_GATEWAY,
-            detail={
-                "error": "upstream_api_error",
-                "message": sanitized_msg,
-                "upstreamStatus": upstream_resp.status_code,
-            },
-        )
-
-    try:
-        upstream_data = upstream_resp.json()
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={
-                "error": "invalid_upstream_json",
-                "message": "Upstream response was not valid JSON.",
-            },
-        )
+    upstream_data = await _execute_upstream_inference(
+        config=config,
+        filename=filename,
+        file_bytes=file_bytes,
+        file_mime=file_mime,
+        imgsz=imgsz,
+        conf=conf,
+        iou=iou,
+    )
 
     # 5. Normalize results schema
     raw_results = []
@@ -300,7 +356,6 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
         "coordinateSpace": coordinate_space,
         "inferenceWidth": imgsz,
         "inferenceHeight": imgsz,
-        "pingMs": elapsed_ms,
         "results": standardized_results,
         "metadata": {
             "upstreamTask": upstream_data.get("metadata", {}).get("task", "detect"),
@@ -309,6 +364,7 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
 
 
 @app.post("/api/export-yolo")
+@measure_telemetry(metric_name="api_export_yolo")
 async def export_yolo_zip(request: Request):
     """Generates an Ultralytics YOLO detect format dataset ZIP archive from reviewed records."""
     import base64

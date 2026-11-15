@@ -47,6 +47,19 @@
     // Initialize Reviewer
     window.Reviewer = new window.ReviewManager();
 
+    // AOP Aspect Integration: Circuit Breaker Listener
+    if (typeof window !== 'undefined' && window.SchaleAOP && window.SchaleAOP.defaultCircuitBreaker) {
+        window.SchaleAOP.defaultCircuitBreaker.addListener((evt, data) => {
+            if (evt === 'trip') {
+                state.isRunning = false;
+                $('btnStart').classList.remove('hidden');
+                $('btnStop').classList.add('hidden');
+                toast(`서킷 브레이커 차단 (${data.statusCode}): API 키 권한 또는 서버 상태를 확인하십시오.`, true);
+                $('statusTxt').innerHTML = `<span class="text-red-600 font-black">🚨 서킷 브레이커 작동 (${data.statusCode}): ${data.message} (작전 자동 격리)</span>`;
+            }
+        });
+    }
+
     function generateSessionId() {
         const d = new Date();
         const pad = n => String(n).padStart(2, '0');
@@ -299,8 +312,12 @@
         const st = Date.now();
 
         try {
-            // Call same-origin backend proxy
-            const res = await fetch("/api/predict", {
+            // Call proxy via AOP Circuit Breaker Aspect
+            const apiFetcher = (typeof window !== 'undefined' && window.SchaleAOP && window.SchaleAOP.defaultCircuitBreaker)
+                ? (url, opts) => window.SchaleAOP.defaultCircuitBreaker.wrapFetch(url, opts)
+                : fetch;
+
+            const res = await apiFetcher("/api/predict", {
                 method: "POST",
                 body: fd,
                 signal: state.abortController.signal
@@ -310,7 +327,11 @@
 
             if (!res.ok) {
                 const errData = await res.json().catch(() => ({}));
-                const errMsg = errData.detail?.message || `HTTP ${res.status}`;
+                let errMsg = errData.detail?.message || `HTTP ${res.status}`;
+                if (typeof window !== 'undefined' && window.SchaleAOP && window.SchaleAOP.SecretRedactor) {
+                    errMsg = window.SchaleAOP.SecretRedactor.redact(errMsg);
+                }
+
                 if (res.status === 401 || res.status === 503) {
                     // Fatal Auth Error: Fail-Closed Circuit Breaker - Stop operation immediately to prevent loop spamming
                     state.isRunning = false;
@@ -325,6 +346,12 @@
 
             const data = await res.json();
             const elapsed = Date.now() - st;
+
+            // AOP Aspect 3: Telemetry recording
+            if (typeof window !== 'undefined' && window.SchaleAOP && window.SchaleAOP.defaultTelemetry) {
+                window.SchaleAOP.defaultTelemetry.record(elapsed, true);
+            }
+
             $('statusTxt').innerHTML = `<span class="text-green-600">🟢 추론 성공 (Ping: ${elapsed}ms)</span>`;
 
             // Coordinate Space Badge update
@@ -496,7 +523,17 @@
                 state.errorCount++;
                 const errBox = $('cntError');
                 if (errBox) errBox.innerText = state.errorCount;
-                $('statusTxt').innerHTML = `<span class="text-red-500">🔴 에러: ${e.message}</span>`;
+
+                const safeMsg = (typeof window !== 'undefined' && window.SchaleAOP && window.SchaleAOP.SecretRedactor)
+                    ? window.SchaleAOP.SecretRedactor.redact(e.message)
+                    : e.message;
+                $('statusTxt').innerHTML = `<span class="text-red-500">🔴 에러: ${safeMsg}</span>`;
+
+                // AOP Aspect 3: Telemetry recording for failure
+                const elapsed = Date.now() - st;
+                if (typeof window !== 'undefined' && window.SchaleAOP && window.SchaleAOP.defaultTelemetry) {
+                    window.SchaleAOP.defaultTelemetry.record(elapsed, false);
+                }
             }
         } finally {
             state.isInferenceInFlight = false;

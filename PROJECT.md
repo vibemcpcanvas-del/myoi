@@ -38,6 +38,17 @@ myoi/
 ├── PROJECT.md                       # 시스템 아키텍처 및 진입점 SSOT
 ├── WBS.md                           # WBS 패키지 상태 원장 SSOT
 ├── specs/                           # WBS 패키지별 사양서 및 도메인 계약
+├── src/                             # 백엔드 코어 및 AOP 관심사 분리 모듈
+│   ├── aspects/                     # 5대 AOP 횡단 관심사 (보안/서킷/텔레메트리/불변식/감사)
+│   ├── config.py                    # 설정 및 환경변수 주입
+│   ├── coordinate_adapter.py        # Letterbox 및 좌표계 변환기
+│   ├── server.py                    # FastAPI 프록시 서버
+│   └── yolo_exporter.py             # Ultralytics YOLO ZIP 패키저
+├── static/                          # 프런트엔드 웹 UI 및 AOP 인터셉터
+│   ├── aspects.js                   # 프런트엔드 AOP 서킷 브레이커 & 게이트
+│   ├── app.js                       # 메인 스트리밍 트래커
+│   ├── reviewer.js                  # 인터랙티브 라벨 검수기
+│   └── coordinate_adapter.js        # 클라이언트 좌표 변환기
 ├── tests/                           # 타겟 격리 단위/통합 테스트 스위트
 ├── docs/                            # 기술 문서 및 환경 구성 매뉴얼
 └── scripts/                         # 마스터 러너 및 보조 자동화 도구

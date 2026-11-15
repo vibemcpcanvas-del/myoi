@@ -93,3 +93,29 @@
 * **인수 기준**: 15대 필수 테스트 전 항목 100% PASS, 거버넌스 불변식 100% PASS, 실제 산출물 전수 육안/해시 검증.
 * **감사 판정**: `[PASS]`
 * **롤백 전략**: `git checkout HEAD -- tests/ docs/`
+
+---
+
+### [WBS-05] AOP 횡단 관심사 고도화 및 아키텍처 디커플링
+
+* **목표 및 범위**: AOP(Aspect-Oriented Programming) 원칙을 적용하여 5대 횡단 관심사(비밀값 마스킹/정화, Fail-Closed 서킷 브레이커 및 백오프 정책, 레이턴시/헬스 텔레메트리, 좌표 및 경계 불변식 검증 게이트, 감사 추적 및 매니페스트 정화)를 백엔드와 프런트엔드 전반에서 깔끔하게 분리하고 고도화.
+* **선행 의존성**: WBS-04 [PASS]
+* **담당자**: 실행자 (Antigravity Coordinator) / 감사자 (Coarena Advisor `gpt-6-astra`)
+* **산출물**:
+  - `src/aspects/__init__.py`
+  - `src/aspects/base.py`
+  - `src/aspects/redaction.py`
+  - `src/aspects/circuit_breaker.py`
+  - `src/aspects/telemetry.py`
+  - `src/aspects/invariants.py`
+  - `src/aspects/audit.py`
+  - `static/aspects.js`
+  - `tests/test_aop_aspects.py`
+* **인수 기준**:
+  1. 기존 49개 단위 및 통합 테스트 100% 무회귀 PASS.
+  2. 신규 5대 AOP 횡단 관심사 전용 테스트 17종 100% PASS.
+  3. 프런트엔드 `static/aspects.js` Node.js 런타임 검증 100% PASS.
+  4. Fail-Closed 서킷 브레이커, 비밀값 정화, 실시간 텔레메트리, 좌표계 차단 및 감사 추적 입증.
+  5. WBS 게이트 유효성 검사기(`wbs_gate_validator.py`) 100% PASS.
+* **감사 판정**: `[PASS]`
+* **롤백 전략**: `git checkout HEAD -- src/ static/ tests/ WBS.md`

@@ -447,9 +447,18 @@
                         b.y2 = Math.min(this.canvas.height, b.y1 + 80);
                         b.width = b.x2 - b.x1;
                         b.height = b.y2 - b.y1;
-                    }
                 }
-                this.boxOrigin = null;
+
+                // AOP Aspect 5: Audit Trail box edit logging
+                if (typeof window !== 'undefined' && window.SchaleAOP && window.SchaleAOP.AuditTrailAspect) {
+                    const actionName = this.dragHandle === 'drawing' ? 'ADD_BOX' : 'RESIZE_BOX';
+                    window.SchaleAOP.AuditTrailAspect.recordBoxEdit(rec, actionName, {
+                        index: this.selectedBoxIndex,
+                        box: b
+                    });
+                }
+            }
+            this.boxOrigin = null;
             }
             this.isDragging = false;
             this.dragHandle = null;
@@ -460,6 +469,15 @@
         deleteSelectedBox() {
             const rec = this.records[this.currentRecordIndex];
             if (!rec || this.selectedBoxIndex < 0) return;
+
+            // AOP Aspect 5: Audit Trail box deletion logging
+            if (typeof window !== 'undefined' && window.SchaleAOP && window.SchaleAOP.AuditTrailAspect) {
+                window.SchaleAOP.AuditTrailAspect.recordBoxEdit(rec, 'DELETE_BOX', {
+                    index: this.selectedBoxIndex,
+                    box: rec.reviewedAnnotations[this.selectedBoxIndex]?.box
+                });
+            }
+
             rec.reviewedAnnotations.splice(this.selectedBoxIndex, 1);
             this.selectedBoxIndex = -1;
             this.drawCanvas();
@@ -502,8 +520,19 @@
             }
 
             const ann = rec.reviewedAnnotations[this.selectedBoxIndex];
+            const oldClassId = ann.classId;
             ann.classId = parseInt(classId);
             ann.className = sel.selectedOptions[0]?.text || ('Class ' + classId);
+
+            // AOP Aspect 5: Audit Trail class update logging
+            if (typeof window !== 'undefined' && window.SchaleAOP && window.SchaleAOP.AuditTrailAspect) {
+                window.SchaleAOP.AuditTrailAspect.recordBoxEdit(rec, 'UPDATE_CLASS', {
+                    index: this.selectedBoxIndex,
+                    previousClassId: oldClassId,
+                    newClassId: ann.classId
+                });
+            }
+
             this.drawCanvas();
         }
 
@@ -512,29 +541,42 @@
             if (!rec) return;
 
             if (status === 'approved') {
-                // Invariant 1: Unverified coordinate space strictly blocked
-                if (rec.coordinateSpace === 'unknown' || rec.coordinateTransformStatus === 'unverified') {
-                    alert('승인 불가: 좌표계가 검증되지 않았거나(unknown) 변환에 실패한 프레임은 학습용 라벨로 승인할 수 없습니다.');
-                    return;
-                }
-
-                // Invariant 2: Box boundaries and degeneracy validation
-                const boxes = rec.reviewedAnnotations || [];
-                for (let i = 0; i < boxes.length; i++) {
-                    const b = boxes[i].box;
-                    if (b.x2 <= b.x1 || b.y2 <= b.y1 || b.x1 < 0 || b.y1 < 0 || b.x2 > rec.originalWidth || b.y2 > rec.originalHeight) {
-                        alert(`승인 불가: 박스 [${i + 1}]의 좌표가 비정상입니다. (x1:${b.x1}, y1:${b.y1}, x2:${b.x2}, y2:${b.y2})`);
+                // AOP Aspect 4: Boundary & Coordinate Invariant Gate
+                if (typeof window !== 'undefined' && window.SchaleAOP && window.SchaleAOP.ReviewGateAspect) {
+                    const check = window.SchaleAOP.ReviewGateAspect.validateRecordForApproval(rec);
+                    if (!check.valid) {
+                        alert(`승인 불가: ${check.error}`);
                         return;
                     }
-                    if (typeof boxes[i].classId !== 'number' || boxes[i].classId < 0) {
-                        alert(`승인 불가: 박스 [${i + 1}]의 클래스 ID(${boxes[i].classId})가 비정상입니다.`);
+                } else {
+                    // Fallback inline verification
+                    if (rec.coordinateSpace === 'unknown' || rec.coordinateTransformStatus === 'unverified') {
+                        alert('승인 불가: 좌표계가 검증되지 않았거나(unknown) 변환에 실패한 프레임은 학습용 라벨로 승인할 수 없습니다.');
                         return;
+                    }
+                    const boxes = rec.reviewedAnnotations || [];
+                    for (let i = 0; i < boxes.length; i++) {
+                        const b = boxes[i].box;
+                        if (b.x2 <= b.x1 || b.y2 <= b.y1 || b.x1 < 0 || b.y1 < 0 || b.x2 > rec.originalWidth || b.y2 > rec.originalHeight) {
+                            alert(`승인 불가: 박스 [${i + 1}]의 좌표가 비정상입니다. (x1:${b.x1}, y1:${b.y1}, x2:${b.x2}, y2:${b.y2})`);
+                            return;
+                        }
+                        if (typeof boxes[i].classId !== 'number' || boxes[i].classId < 0) {
+                            alert(`승인 불가: 박스 [${i + 1}]의 클래스 ID(${boxes[i].classId})가 비정상입니다.`);
+                            return;
+                        }
                     }
                 }
             }
 
-            rec.reviewStatus = status;
-            rec.reviewedAtUtc = new Date().toISOString();
+            // AOP Aspect 5: Audit Trail Record Update
+            if (typeof window !== 'undefined' && window.SchaleAOP && window.SchaleAOP.AuditTrailAspect) {
+                window.SchaleAOP.AuditTrailAspect.recordDecision(rec, status);
+            } else {
+                rec.reviewStatus = status;
+                rec.reviewedAtUtc = new Date().toISOString();
+            }
+
             this.updateCounts();
             this.renderList();
 

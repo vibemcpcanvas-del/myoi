@@ -9,10 +9,12 @@ Enforces strict gate invariants:
 - Train/Val split by session to prevent frame leakage.
 - Hash-based duplicate detection.
 - Generates data.yaml, manifest.json, and manifest.jsonl with sanitized metadata.
+
+Aspect-Oriented auditing and coordinate invariant enforcement are decoupled via
+src.aspects.audit and src.aspects.invariants.
 """
 
 from datetime import datetime, timezone
-import hashlib
 import io
 import json
 from pathlib import Path
@@ -20,20 +22,21 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import zipfile
 import yaml
 
+from src.aspects.audit import (
+    audit_manifest_export,
+    compute_sha256,
+    sanitize_record_for_manifest,
+)
+from src.aspects.invariants import assert_verified_coordinate_space
 from src.coordinate_adapter import BoundingBox, to_yolo_detection
-
-
-def compute_sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 def _sanitize_record_for_manifest(rec: Dict[str, Any]) -> Dict[str, Any]:
     """Strips large in-memory transport fields (base64, blobs) from manifest records."""
-    excluded_fields = {"origBase64", "prevBase64", "origBlob", "prevBlob"}
-    clean_rec = {k: v for k, v in rec.items() if k not in excluded_fields}
-    return clean_rec
+    return sanitize_record_for_manifest(rec)
 
 
+@audit_manifest_export()
 def validate_and_build_yolo_dataset(
     manifest_records: List[Dict[str, Any]],
     image_data_map: Dict[str, bytes],
@@ -84,7 +87,7 @@ def validate_and_build_yolo_dataset(
 
     report["checks"]["approvedRecordsChecked"] = True
 
-    # 2. Strict Coordinate Space Verification
+    # 2. Strict Coordinate Space Verification via AOP invariant gate
     for rec in approved_records:
         c_space = rec.get("coordinateSpace", "letterbox_640")
         c_status = rec.get("coordinateTransformStatus", "verified")
@@ -270,8 +273,8 @@ def validate_and_build_yolo_dataset(
         }
         zf.writestr("data.yaml", yaml.dump(yaml_content, sort_keys=False))
 
-        # Sanitize records for manifest to prevent base64 bloat
-        sanitized_records = [_sanitize_record_for_manifest(r) for r in approved_records]
+        # Sanitize records for manifest to prevent base64 bloat via AOP aspect
+        sanitized_records = [sanitize_record_for_manifest(r) for r in approved_records]
         exported_at_utc = datetime.now(timezone.utc).isoformat()
 
         # Write manifest.json
