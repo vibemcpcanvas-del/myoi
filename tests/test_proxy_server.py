@@ -89,19 +89,20 @@ def test_predict_unconfigured_api_key(client, monkeypatch, sample_jpeg_bytes):
 
 
 def test_no_api_key_in_frontend_or_source():
-    """Security Invariant: Verify that no hardcoded secret keys are present in source files or frontend."""
+    """Security Invariant: Verify that no hardcoded secret keys are present in source files, frontend, or docs."""
     suspicious_patterns = [
         "ul_sample_redacted_key_1",  # Exposed key from original HTML
+        "ul_sample_redacted_key_2",  # User inputted key
     ]
-    # We check src/ and static/
+    # We check src/, static/, and docs/
     repo_root = Path(__file__).resolve().parent.parent
-    check_dirs = [repo_root / "src", repo_root / "static"]
+    check_dirs = [repo_root / "src", repo_root / "static", repo_root / "docs"]
 
     for d in check_dirs:
         if not d.exists():
             continue
         for file_path in d.rglob("*"):
-            if file_path.is_file() and file_path.suffix in (".py", ".js", ".html", ".json"):
+            if file_path.is_file() and file_path.suffix in (".py", ".js", ".html", ".json", ".md"):
                 text = file_path.read_text(encoding="utf-8", errors="ignore")
                 for pat in suspicious_patterns:
                     assert pat not in text, f"Found exposed secret key in {file_path}: {pat}"
@@ -178,7 +179,7 @@ def test_export_yolo_endpoint_blocks_unknown_coord_space(client, sample_jpeg_byt
 
 
 def test_endpoint_url_normalization():
-    """Verify endpoint URL normalization handles bare hostnames, trailing slashes, and paths."""
+    """Verify endpoint URL normalization handles bare hostnames, trailing slashes, query params, fragments, and paths."""
     from src.config import normalize_inference_url, DEFAULT_INFERENCE_API_URL
 
     # Bare domain without path -> appends /predict
@@ -192,6 +193,26 @@ def test_endpoint_url_normalization():
     # Already has /predict -> preserved
     url3 = "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict"
     assert normalize_inference_url(url3) == "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict"
+
+    # Preserves query parameters
+    url4 = "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app?token=123"
+    assert normalize_inference_url(url4) == "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict?token=123"
+
+    # Trailing slash with query parameter
+    url5 = "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/?conf=0.25"
+    assert normalize_inference_url(url5) == "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict?conf=0.25"
+
+    # Missing scheme -> defaults to https://
+    url6 = "predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app"
+    assert normalize_inference_url(url6) == "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict"
+
+    # Preserves fragment
+    url7 = "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app#live"
+    assert normalize_inference_url(url7) == "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict#live"
+
+    # Preserves custom sub-paths
+    url8 = "http://127.0.0.1:8000/custom/inference"
+    assert normalize_inference_url(url8) == "http://127.0.0.1:8000/custom/inference"
 
     # None or empty string -> returns DEFAULT_INFERENCE_API_URL
     assert normalize_inference_url(None) == DEFAULT_INFERENCE_API_URL
@@ -207,4 +228,116 @@ def test_health_reports_updated_endpoint(client):
     assert "predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app" in data["upstreamEndpoint"]
     assert "Authorization" not in resp.headers
     assert "key" not in data or data.get("key") is None
+
+
+def test_resolve_api_key_scenarios(monkeypatch, tmp_path):
+    """Verify multi-tier API key resolution precedence, quotes stripping, and empty string handling."""
+    from src.config import resolve_api_key
+
+    # 1. Direct process environment takes precedence with quotes stripped
+    monkeypatch.setenv("INFERENCE_API_KEY", '"ul_test_env_key"')
+    assert resolve_api_key() == "ul_test_env_key"
+
+    # 2. Explicit empty string in environment does NOT fallback (fail-closed)
+    monkeypatch.setenv("INFERENCE_API_KEY", "")
+    assert resolve_api_key() is None
+
+    # 3. SCHALE_INFERENCE_KEY secondary environment fallback
+    monkeypatch.delenv("INFERENCE_API_KEY", raising=False)
+    monkeypatch.setenv("SCHALE_INFERENCE_KEY", "'ul_schale_fallback'")
+    assert resolve_api_key() == "ul_schale_fallback"
+
+    monkeypatch.delenv("SCHALE_INFERENCE_KEY", raising=False)
+
+    # 4. Local .env file parsing with spaces around = and inline comment
+    repo_root = Path(__file__).resolve().parent.parent
+    dotenv_path = repo_root / ".env"
+    try:
+        dotenv_path.write_text("INFERENCE_API_KEY = ul_from_dotenv # secret key\n", encoding="utf-8")
+        assert resolve_api_key() == "ul_from_dotenv"
+    finally:
+        if dotenv_path.exists():
+            dotenv_path.unlink()
+
+
+def test_predict_forwards_conf_and_iou(client, monkeypatch, sample_jpeg_bytes):
+    """Verify that conf and iou parameters in form data are forwarded to upstream."""
+    monkeypatch.setenv("INFERENCE_API_KEY", "ul_dummy_key")
+    monkeypatch.setenv("MOCK_INFERENCE", "false")
+
+    captured_data = {}
+
+    class MockResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "images": [{"shape": [640, 640], "results": []}],
+                "metadata": {"task": "detect"},
+            }
+
+    class MockAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+        async def post(self, url, headers=None, files=None, data=None):
+            captured_data.update(data or {})
+            return MockResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", MockAsyncClient)
+
+    files = {"file": ("test.jpg", sample_jpeg_bytes, "image/jpeg")}
+    data = {"imgsz": "640", "conf": "0.15", "iou": "0.45"}
+    resp = client.post("/api/predict", files=files, data=data)
+    assert resp.status_code == 200
+    assert captured_data.get("conf") == "0.15"
+    assert captured_data.get("iou") == "0.45"
+    assert captured_data.get("imgsz") == "640"
+
+
+
+def test_upstream_401_redacts_secret_in_error(client, monkeypatch, sample_jpeg_bytes):
+    """Verify that when upstream returns 401 with a body echoing the key, the key is redacted."""
+    monkeypatch.setenv("INFERENCE_API_KEY", "ul_super_secret_key_12345")
+    monkeypatch.setenv("MOCK_INFERENCE", "false")
+
+    class MockResponse:
+        status_code = 401
+
+        def json(self):
+            return {
+                "error": "Unauthorized",
+                "message": "Invalid token: ul_super_secret_key_12345 provided",
+            }
+
+    class MockAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+        async def post(self, *args, **kwargs):
+            return MockResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", MockAsyncClient)
+
+    files = {"file": ("test.jpg", sample_jpeg_bytes, "image/jpeg")}
+    resp = client.post("/api/predict", files=files)
+    assert resp.status_code == 401
+    err = resp.json()
+    assert err["detail"]["error"] == "upstream_api_error"
+    # Ensure raw secret is NEVER in response body
+    assert "ul_super_secret_key_12345" not in str(err)
+    assert "[REDACTED]" in err["detail"]["message"]
+
 

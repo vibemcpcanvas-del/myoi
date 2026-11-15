@@ -15,26 +15,28 @@ DEFAULT_INFERENCE_API_URL = "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a
 
 def normalize_inference_url(raw_url: Optional[str]) -> str:
     """Normalizes an inference endpoint URL.
-    - Strips whitespace and trailing slashes.
-    - Ensures standard Cloud Run / REST inference path '/predict' is present if omitted.
+    - Strips whitespace.
+    - Ensures scheme defaults to https:// if omitted.
+    - Ensures standard Cloud Run / REST inference path '/predict' is present if omitted or root.
+    - Cleanly preserves query strings, fragments, and custom sub-paths.
     """
     if not raw_url:
         return DEFAULT_INFERENCE_API_URL
-    cleaned = raw_url.strip().rstrip("/")
+    cleaned = raw_url.strip()
     if not cleaned:
         return DEFAULT_INFERENCE_API_URL
 
-    parsed = urllib.parse.urlparse(cleaned)
-    # If scheme is omitted, default to https://
-    if not parsed.scheme:
+    if not cleaned.startswith(("http://", "https://")):
         cleaned = f"https://{cleaned}"
-        parsed = urllib.parse.urlparse(cleaned)
 
-    # If there is no explicit path component, append /predict
-    if not parsed.path or parsed.path == "":
-        return f"{cleaned}/predict"
+    parts = urllib.parse.urlsplit(cleaned)
+    path = parts.path.rstrip("/")
+    if not path or path == "":
+        new_path = "/predict"
+    else:
+        new_path = path
 
-    return cleaned
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, new_path, parts.query, parts.fragment))
 
 
 def resolve_api_key() -> Optional[str]:
@@ -46,13 +48,13 @@ def resolve_api_key() -> Optional[str]:
     4. Windows Registry User Environment (HKCU) / System Environment (HKLM)
     """
     # 1. Direct process environment check
-    if "INFERENCE_API_KEY" in os.environ:
-        val = os.environ["INFERENCE_API_KEY"]
-        return val.strip() if val and val.strip() else None
-
-    if "SCHALE_INFERENCE_KEY" in os.environ:
-        val = os.environ["SCHALE_INFERENCE_KEY"]
-        return val.strip() if val and val.strip() else None
+    for env_var in ("INFERENCE_API_KEY", "SCHALE_INFERENCE_KEY"):
+        if env_var in os.environ:
+            val = os.environ[env_var]
+            if val is not None:
+                cleaned_val = val.strip().strip('"').strip("'")
+                # If set to non-empty string, return it; if explicitly set to empty, respect it and do not fallback
+                return cleaned_val if cleaned_val else None
 
     # 2. Local .env file check
     try:
@@ -62,16 +64,14 @@ def resolve_api_key() -> Optional[str]:
             with open(dotenv_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith("#") or not line:
+                    if not line or line.startswith("#"):
                         continue
-                    if line.startswith("INFERENCE_API_KEY="):
-                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        if val:
-                            return val
-                    elif line.startswith("SCHALE_INFERENCE_KEY="):
-                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        if val:
-                            return val
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.split("#", 1)[0].strip().strip('"').strip("'")
+                        if k in ("INFERENCE_API_KEY", "SCHALE_INFERENCE_KEY") and v:
+                            return v
     except Exception:
         pass
 
@@ -89,8 +89,10 @@ def resolve_api_key() -> Optional[str]:
                         for key_name in ("INFERENCE_API_KEY", "SCHALE_INFERENCE_KEY"):
                             try:
                                 val, _ = winreg.QueryValueEx(k, key_name)
-                                if val and str(val).strip():
-                                    return str(val).strip()
+                                if val:
+                                    cleaned = str(val).strip().strip('"').strip("'")
+                                    if cleaned:
+                                        return cleaned
                             except FileNotFoundError:
                                 continue
                 except Exception:

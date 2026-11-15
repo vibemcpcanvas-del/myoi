@@ -125,10 +125,12 @@
 ### 6.2 인증 키 감사 및 포렌식 진단
 1. **사용자 환경변수 설정 진단**:
    - 사용자가 파워셸 터미널 세션에서 `$env:INFERENCE_API_KEY = "ul_0a...3d0e"`를 입력하였으나, 이는 프로세스 로컬 변수이므로 영구 레지스트리(`HKCU\Environment`)에 기록되지 않는 윈도우 환경 특성을 확인.
-   - 이에 따라 시스템 차원에서 사용자 환경 레지스트리에 영구 등록 완료 및 `src/config.py`에 프로세스 환경변수 우선 + Windows 레지스트리 폴백 조회 로직 구축.
+   - 이에 따라 시스템 차원에서 사용자 환경 레지스트리에 영구 등록 완료 및 `src/config.py`에 프로세스 환경변수 우선 + `.env` 파일 + Windows 레지스트리 폴백 조회 로직 구축.
 2. **라이브 인증 결과 (Fail-Closed 검증)**:
    - 신규 키 `ul_0a...3d0e`: 업스트림 Cloud Run 서비스에서 `HTTP 401 Unauthorized` 반환 (`Invalid API key. Please provide a valid platform API key (ul_xxx).`)
    - 기존 키 `ul_ef...9226`: 업스트림 Cloud Run 신규 엔드포인트에서 `HTTP 200 OK` 정상 추론 및 결과 반환.
-   - **조치 권고**: 신규 발급된 API 키가 Ultralytics Hub 상에서 올바른 워크스페이스 권한을 보유하고 있는지 재확인하거나, 플랫폼 콘솔에서 재발급 필요.
-   - **보안 격리**: API 키 불일치 및 401 발생 시 프록시 서버는 내부 키를 노출하지 않고 안전하게 `HTTP 401 upstream_api_error`를 반환하는 Fail-Closed 안전 규칙 입증.
+   - **조치 권고**: 신규 발급된 API 키가 Ultralytics Platform 상에서 신규 배포 모델 `best (1)` 워크스페이스 권한을 보유하고 있는지 재확인하거나, 플랫폼 콘솔(`https://platform.ultralytics.com`)에서 모델 전용 키로 재발급 필요.
+   - **보안 격리 및 Fail-Closed 입증**:
+     - API 키 불일치 및 401 발생 시 프록시 서버는 내부 키를 일절 노출하지 않고(응답 본문 내 키 탐지 시 `[REDACTED]` 치환) 안전하게 `HTTP 401 upstream_api_error` 반환.
+     - 프런트엔드 UI는 탐지 객체 0개 처리 및 라벨 저장/수집을 원천 차단하여 침묵하는 폴백(Silent Fallback)이나 합성 라벨 오염을 방지함.
 

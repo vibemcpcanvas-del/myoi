@@ -113,6 +113,24 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
             except ValueError:
                 pass
 
+        conf: Optional[float] = None
+        if "conf" in form_data.fields:
+            try:
+                parsed_conf = float(form_data.fields["conf"])
+                if 0.01 <= parsed_conf <= 1.0:
+                    conf = parsed_conf
+            except ValueError:
+                pass
+
+        iou: Optional[float] = None
+        if "iou" in form_data.fields:
+            try:
+                parsed_iou = float(form_data.fields["iou"])
+                if 0.0 <= parsed_iou <= 0.95:
+                    iou = parsed_iou
+            except ValueError:
+                pass
+
         if "coordinateSpace" in form_data.fields:
             coordinate_space = form_data.fields["coordinateSpace"]
 
@@ -122,6 +140,8 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
         file_bytes = body_bytes
         file_mime = content_type_header
         filename = "stream_frame.jpg"
+        conf = None
+        iou = None
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -186,9 +206,13 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
     files = {
         "file": (filename, file_bytes, file_mime),
     }
-    data = {
+    data: Dict[str, str] = {
         "imgsz": str(imgsz),
     }
+    if conf is not None:
+        data["conf"] = str(conf)
+    if iou is not None:
+        data["iou"] = str(iou)
 
     try:
         async with httpx.AsyncClient(timeout=config.request_timeout_sec) as client:
@@ -224,11 +248,15 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
         except Exception:
             err_msg = f"Upstream returned HTTP {upstream_resp.status_code}"
 
+        sanitized_msg = str(err_msg)
+        if config.inference_api_key and config.inference_api_key in sanitized_msg:
+            sanitized_msg = sanitized_msg.replace(config.inference_api_key, "[REDACTED]")
+
         raise HTTPException(
             status_code=upstream_resp.status_code if upstream_resp.status_code in (400, 401, 403, 500) else status.HTTP_502_BAD_GATEWAY,
             detail={
                 "error": "upstream_api_error",
-                "message": str(err_msg),
+                "message": sanitized_msg,
                 "upstreamStatus": upstream_resp.status_code,
             },
         )
