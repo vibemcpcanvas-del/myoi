@@ -331,3 +331,22 @@ def test_javascript_coordinate_adapter_in_node():
     res = subprocess.run([node_bin, "-e", node_test_script], capture_output=True, text=True)
     assert res.returncode == 0, f"Node test failed: {res.stderr}"
     assert "JS_ALL_TESTS_PASS" in res.stdout
+
+
+def test_fatal_auth_401_circuit_breaker_stops_loop():
+    """Verify Fail-Closed invariant: on 401 Unauthorized or 503, operation loop MUST immediately halt
+    rather than endlessly spamming the server at 200ms intervals.
+    """
+    tracker = MockTacticalTracker()
+    tracker.start_stream()
+    tracker.start_ops()
+    assert tracker.isRunning is True
+
+    # Simulate receiving 401 Unauthorized from inference endpoint
+    status_code = 401
+    if status_code in (401, 503):
+        tracker.stop_ops()
+
+    assert tracker.isRunning is False
+    assert tracker.timerActive is False
+

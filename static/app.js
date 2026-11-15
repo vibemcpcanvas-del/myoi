@@ -263,7 +263,9 @@
 
         if (!vw || !vh) {
             $('statusTxt').innerHTML = '<span class="text-amber-600">🟡 비디오 메타데이터 준비 대기 중...</span>';
+            if (state.isRunning) {
             state.timer = setTimeout(loop, 200);
+        }
             return;
         }
 
@@ -282,7 +284,9 @@
         if (!blob || blob.size === 0) {
             toast("프레임 인코딩 실패 (0 바이트)", true);
             state.isInferenceInFlight = false;
+            if (state.isRunning) {
             state.timer = setTimeout(loop, 200);
+        }
             return;
         }
 
@@ -306,7 +310,17 @@
 
             if (!res.ok) {
                 const errData = await res.json().catch(() => ({}));
-                throw new Error(errData.detail?.message || `HTTP ${res.status}`);
+                const errMsg = errData.detail?.message || `HTTP ${res.status}`;
+                if (res.status === 401 || res.status === 503) {
+                    // Fatal Auth Error: Fail-Closed Circuit Breaker - Stop operation immediately to prevent loop spamming
+                    state.isRunning = false;
+                    $('btnStart').classList.remove('hidden');
+                    $('btnStop').classList.add('hidden');
+                    toast(`인증 실패 (${res.status}): API 키 권한을 확인하십시오. 작전이 자동 중지되었습니다.`, true);
+                    $('statusTxt').innerHTML = `<span class="text-red-600 font-black">🚨 인증 실패 (${res.status}): ${errMsg} (작전 자동 중단)</span>`;
+                    return;
+                }
+                throw new Error(errMsg);
             }
 
             const data = await res.json();
@@ -489,7 +503,9 @@
             state.abortController = null;
         }
 
-        state.timer = setTimeout(loop, 200);
+        if (state.isRunning) {
+            state.timer = setTimeout(loop, 200);
+        }
     };
 
     // --- High-Resolution Snapshot Capture ---
