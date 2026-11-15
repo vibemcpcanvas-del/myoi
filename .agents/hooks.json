@@ -1,0 +1,12 @@
+{
+  "coarena-advisor": {
+    "enabled": true,
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python C:\\Users\\ROCmAdmin\\tes\\advisor_hook.py",
+        "timeout": 30
+      }
+    ]
+  }
+}
