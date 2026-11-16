@@ -6,9 +6,16 @@ are decoupled using Aspect-Oriented Programming (AOP).
 """
 
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
+import sys
 from typing import Any, Dict, List, Optional
 import time
+
+# Ensure repository root is on sys.path for direct execution
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,12 +41,26 @@ from src.multipart_parser import parse_multipart_body
 from src.yolo_exporter import validate_and_build_yolo_dataset
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+PID_FILE = Path(__file__).resolve().parent.parent / ".server.pid"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
-    yield
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        try:
+            PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+        except Exception:
+            pass
+    try:
+        yield
+    finally:
+        if not os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                if PID_FILE.exists():
+                    PID_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 app = FastAPI(
@@ -424,3 +445,11 @@ async def root_index():
         "status": "SCHALE Tactical Tracking Server is running.",
         "ui": "static/index.html is being prepared.",
     })
+
+
+if __name__ == "__main__":
+    import uvicorn
+    cfg = get_config()
+    print(f"[*] Starting SCHALE Tactical Tracking Server on http://{cfg.host}:{cfg.port}")
+    uvicorn.run("src.server:app", host=cfg.host, port=cfg.port)
+

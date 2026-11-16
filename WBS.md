@@ -142,3 +142,33 @@
 * **감사 판정**: `[PASS]`
 * **롤백 전략**: `git checkout HEAD -- static/ WBS.md`
 
+---
+
+### [WBS-07] 상용 수준 원클릭 런처 체계 및 비개발자 배포 거버넌스 수립
+
+* **목표 및 범위**: `src/server.py` 직접 실행 시의 `ModuleNotFoundError` 근본 원인 해결(프로젝트 루트 `sys.path` 자동 주입 및 main 진입점 구축), 비개발자 대상의 원클릭 더블클릭 런처(`실행하기.bat`, `종료하기.bat`, `바탕화면_바로가기_만들기.bat`, `백그라운드_실행하기.vbs`), PID 추적 기반의 안전한 타겟 프로세스 라이프사이클 관리기(`scripts/launcher.py`), 친절한 사용자 설명서(`사용방법.md`) 및 거버넌스 불변식 검증 테스트 스위트 구축.
+* **선행 의존성**: WBS-06 [PASS]
+* **담당자**: 개발자 (Antigravity Coordinator Gemini) / PM 어드바이저 (Coarena GPT-6 Luna)
+* **산출물**:
+  - `src/server.py`
+  - `run.py`
+  - `scripts/launcher.py`
+  - `실행하기.bat`
+  - `종료하기.bat`
+  - `바탕화면_바로가기_만들기.bat`
+  - `백그라운드_실행하기.vbs`
+  - `requirements.txt`
+  - `사용방법.md`
+  - `tests/test_launcher_governance.py`
+  - `WBS.md`
+* **인수 기준**:
+  1. `python src/server.py` 직접 실행 시 `ModuleNotFoundError` 발생하지 않고 정상 기동 입증.
+  2. `실행하기.bat` 더블클릭 시 Python 환경 점검, 포트 충돌 방지, 백그라운드 헬스체크 확인 후 브라우저(`http://127.0.0.1:8000`) 자동 오픈 100% 정상 작동.
+  3. 무차별 `taskkill /IM python.exe` 전면 금지 및 `.server.pid` 기반의 안전한 타겟 프로세스 종료 100% 보장.
+  4. 실패 숨김 금지: 오류 발생 시 즉시 콘솔에 원인 명시 및 `logs/server.log` 경로 안내 후 사용자 일시정지(`pause`).
+  5. 신규 7종 런처 거버넌스 단위 테스트 100% PASS 및 기존 전체 테스트 무회귀 PASS.
+  6. WBS 게이트 유효성 검사기(`python scripts/wbs_gate_validator.py`) 100% 통과.
+* **감사 판정**: `[PASS]`
+* **롤백 전략**: `git checkout HEAD -- src/server.py run.py WBS.md; rm 실행하기.bat 종료하기.bat 바탕화면_바로가기_만들기.bat 백그라운드_실행하기.vbs 사용방법.md scripts/launcher.py tests/test_launcher_governance.py`
+
+
