@@ -119,3 +119,26 @@
   5. WBS 게이트 유효성 검사기(`wbs_gate_validator.py`) 100% PASS.
 * **감사 판정**: `[PASS]`
 * **롤백 전략**: `git checkout HEAD -- src/ static/ tests/ WBS.md`
+
+---
+
+### [WBS-06] KTOS(Kivotos Tactical Operations System) UI/UX 고도화 및 검수 센터 엔진 구축
+
+* **목표 및 범위**: Day/Night Ops 듀얼 테마 엔진(CSS 변수 및 테마 토글 영속화), 뷰포트 HUD 4각 광학 L-브래킷 레티클 및 캔버스 모노스페이스 텔레메트리 바운딩 박스, 검수 센터 변환 행렬(Pan/Zoom 및 역변환 매핑) 및 전체 키보드 단축키 트리아지 엔진([A]/[R]/[P]/[[/]]/[1-8]/[0]) 구축.
+* **선행 의존성**: WBS-05 [PASS]
+* **담당자**: 실행자 (Antigravity Coordinator) / 감사자 (Coarena Advisor `gpt-6-astra`)
+* **산출물**:
+  - `static/index.html`
+  - `static/app.js`
+  - `static/reviewer.js`
+  - `WBS.md`
+* **인수 기준**:
+  1. Day Ops (라이트) 및 Night Ops (다크) 테마 전환 및 `localStorage` 영속화 100% 정상 작동.
+  2. 뷰포트 4각 광학 L-브래킷 레티클 및 챔퍼 코너 마크 + 텔레메트리 뱃지(`${className} [${conf}%] ${w}x${h}`) 렌더링.
+  3. 검수 센터 캔버스 Pan/Zoom 변환 행렬(`this.view = { scale, panX, panY }`) 및 커서 중심 휠 줌, 스페이스 드래그 팬, 역변환 좌표 매핑 동기화.
+  4. 단축키 트리아지 엔진(`[A]`, `[R]`, `[P]`, `[`, `]`, `[1]`-`[8]`, `[0]`, `Delete`/`Backspace`) 100% 정상 작동.
+  5. 69개 전체 단위/통합 테스트 100% 무회귀 PASS 및 JS 구문 검사(`node -c`) 통과.
+  6. WBS 게이트 유효성 검사기(`wbs_gate_validator.py`) 및 `run.py status` 100% PASS.
+* **감사 판정**: `[PASS]`
+* **롤백 전략**: `git checkout HEAD -- static/ WBS.md`
+

@@ -68,6 +68,137 @@
 
     $('txtSessionId').innerText = state.sessionId;
 
+    // --- Day/Night Ops Dual-Theme Engine ---
+    function initThemeToggle() {
+        const btn = $('themeToggleBtn');
+        const icon = $('themeIcon');
+        const label = $('themeLabel');
+        if (!btn) return;
+
+        function syncThemeUI() {
+            const isDark = document.documentElement.classList.contains('dark');
+            if (icon) icon.innerText = isDark ? '🌙' : '☀️';
+            if (label) label.innerText = isDark ? 'NIGHT OPS' : 'DAY OPS';
+        }
+
+        btn.onclick = () => {
+            const isDark = document.documentElement.classList.toggle('dark');
+            try {
+                localStorage.setItem('schale_theme', isDark ? 'dark' : 'light');
+            } catch (e) {
+                console.warn('Theme preference storage error:', e);
+            }
+            syncThemeUI();
+        };
+
+        syncThemeUI();
+    }
+    initThemeToggle();
+
+    // --- Tactical HUD & Chamfered Bounding Box Utilities ---
+    function hexToRgba(hex, alpha) {
+        if (!hex || typeof hex !== 'string') return `rgba(18, 116, 196, ${alpha})`;
+        const s = hex.trim();
+        if (s.startsWith('rgb')) {
+            if (s.startsWith('rgba')) return s.replace(/[\d\.]+\)$/g, `${alpha})`);
+            return s.replace('rgb', 'rgba').replace(')', `, ${alpha})`);
+        }
+        let c = s.replace('#', '');
+        if (c.length === 3) c = c.split('').map(x => x + x).join('');
+        const num = parseInt(c, 16);
+        if (isNaN(num)) return `rgba(18, 116, 196, ${alpha})`;
+        return `rgba(${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}, ${alpha})`;
+    }
+
+    function drawTacticalBox(cCtx, dx, dy, dw, dh, opt) {
+        const { className, confidence, width, height, color, isSelected = false, renderScale = 640 } = opt;
+        cCtx.save();
+
+        // 1. Subtle semi-transparent box fill
+        cCtx.fillStyle = isSelected ? 'rgba(255, 255, 255, 0.16)' : hexToRgba(color, 0.08);
+        cCtx.fillRect(dx, dy, dw, dh);
+
+        // 2. Base perimeter stroke
+        cCtx.strokeStyle = isSelected ? '#ffffff' : color;
+        cCtx.lineWidth = isSelected ? Math.max(2.5, renderScale / 350) : Math.max(1.5, renderScale / 500);
+        cCtx.strokeRect(dx, dy, dw, dh);
+
+        // 3. Chamfered Tactical Corner Marks (Optical Reticles)
+        const clen = Math.min(dw / 3, dh / 3, Math.max(8, Math.round(renderScale / 50)));
+        const ch = Math.min(clen / 2, Math.max(2, Math.round(renderScale / 160)));
+        cCtx.strokeStyle = isSelected ? '#ffffff' : color;
+        cCtx.lineWidth = Math.max(2.5, renderScale / 240);
+        cCtx.lineCap = 'square';
+        cCtx.lineJoin = 'miter';
+
+        // Top-Left (Chamfered Corner Mark)
+        cCtx.beginPath();
+        cCtx.moveTo(dx, dy + clen);
+        cCtx.lineTo(dx, dy + ch);
+        cCtx.lineTo(dx + ch, dy);
+        cCtx.lineTo(dx + clen, dy);
+        cCtx.stroke();
+
+        // Top-Right (Chamfered Corner Mark)
+        cCtx.beginPath();
+        cCtx.moveTo(dx + dw - clen, dy);
+        cCtx.lineTo(dx + dw - ch, dy);
+        cCtx.lineTo(dx + dw, dy + ch);
+        cCtx.lineTo(dx + dw, dy + clen);
+        cCtx.stroke();
+
+        // Bottom-Right (Chamfered Corner Mark)
+        cCtx.beginPath();
+        cCtx.moveTo(dx + dw, dy + dh - clen);
+        cCtx.lineTo(dx + dw, dy + dh - ch);
+        cCtx.lineTo(dx + dw - ch, dy + dh);
+        cCtx.lineTo(dx + dw - clen, dy + dh);
+        cCtx.stroke();
+
+        // Bottom-Left (Chamfered Corner Mark)
+        cCtx.beginPath();
+        cCtx.moveTo(dx + clen, dy + dh);
+        cCtx.lineTo(dx + ch, dy + dh);
+        cCtx.lineTo(dx, dy + dh - ch);
+        cCtx.lineTo(dx, dy + dh - clen);
+        cCtx.stroke();
+
+        // 4. Monospaced Telemetry Badge: `${className} [${conf}%] ${w}x${h}`
+        const confVal = Math.round((typeof confidence === 'number' ? confidence : 1) * 100);
+        const telemetryText = `${className} [${confVal}%] ${width}x${height}`;
+
+        const fontSize = Math.max(10, Math.round(renderScale / 60));
+        cCtx.font = `600 ${fontSize}px 'JetBrains Mono', 'Space Grotesk', monospace`;
+        const textMetrics = cCtx.measureText(telemetryText);
+
+        const padX = Math.max(5, Math.round(fontSize * 0.45));
+        const padY = Math.max(3, Math.round(fontSize * 0.25));
+        const badgeW = textMetrics.width + padX * 2 + 4; // 4px accent bar
+        const badgeH = fontSize + padY * 2;
+        const badgeY = (dy - badgeH - 3 < 0) ? dy + 3 : dy - badgeH - 3;
+        const badgeX = dx;
+
+        // Dark high-contrast badge background
+        cCtx.fillStyle = 'rgba(11, 15, 25, 0.88)';
+        cCtx.fillRect(badgeX, badgeY, badgeW, badgeH);
+
+        // Left tactical color stripe
+        cCtx.fillStyle = color;
+        cCtx.fillRect(badgeX, badgeY, 3, badgeH);
+
+        // Subtle badge border
+        cCtx.strokeStyle = isSelected ? '#ffffff' : 'rgba(255, 255, 255, 0.2)';
+        cCtx.lineWidth = 1;
+        cCtx.strokeRect(badgeX, badgeY, badgeW, badgeH);
+
+        // Telemetry Text
+        cCtx.fillStyle = '#ffffff';
+        cCtx.textBaseline = 'middle';
+        cCtx.fillText(telemetryText, badgeX + padX + 3, badgeY + badgeH / 2);
+
+        cCtx.restore();
+    }
+
     // --- Web Audio API (Beep Sound Generator) ---
     let audioCtx;
     const playBeep = () => {
@@ -484,12 +615,14 @@
                 const dw = origBox.width * renderScaleX;
                 const dh = origBox.height * renderScaleY;
 
-                ctx.strokeStyle = color;
-                ctx.lineWidth = Math.max(2, wrapW / 400);
-                ctx.strokeRect(dx, dy, dw, dh);
-                ctx.fillStyle = color;
-                ctx.font = `bold ${Math.max(12, wrapW / 70)}px sans-serif`;
-                ctx.fillText(`${c.name} ${(r.confidence * 100).toFixed(0)}%`, dx, dy - 5);
+                drawTacticalBox(ctx, dx, dy, dw, dh, {
+                    className: c.name,
+                    confidence: r.confidence,
+                    width: Math.round(origBox.width),
+                    height: Math.round(origBox.height),
+                    color: color,
+                    renderScale: wrapW
+                });
             });
 
             // Reset counts for unseen classes
@@ -563,12 +696,14 @@
             detections.forEach(d => {
                 const b = d.box;
                 const color = COLORS[(d.classId || 0) % COLORS.length];
-                prevCtx.strokeStyle = color;
-                prevCtx.lineWidth = Math.max(3, vw / 300);
-                prevCtx.strokeRect(b.x1, b.y1, b.width, b.height);
-                prevCtx.fillStyle = color;
-                prevCtx.font = `bold ${Math.max(16, vw / 60)}px sans-serif`;
-                prevCtx.fillText(`${d.className} ${(d.confidence * 100).toFixed(0)}%`, b.x1, Math.max(24, b.y1 - 6));
+                drawTacticalBox(prevCtx, b.x1, b.y1, b.width, b.height, {
+                    className: d.className,
+                    confidence: d.confidence,
+                    width: Math.round(b.width),
+                    height: Math.round(b.height),
+                    color: color,
+                    renderScale: vw
+                });
             });
 
             const prevBlob = await new Promise(r => state.prevCvs.toBlob(r, 'image/jpeg', 0.85));
