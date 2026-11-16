@@ -252,11 +252,29 @@ def test_resolve_api_key_scenarios(monkeypatch, tmp_path):
     # 4. Local .env file parsing with spaces around = and inline comment
     repo_root = Path(__file__).resolve().parent.parent
     dotenv_path = repo_root / ".env"
+    original_dotenv_content = dotenv_path.read_text(encoding="utf-8") if dotenv_path.exists() else None
     try:
-        dotenv_path.write_text("INFERENCE_API_KEY = ul_from_dotenv # secret key\n", encoding="utf-8")
+        dotenv_path.write_text(
+            "INFERENCE_API_KEY = ul_from_dotenv # secret key\n"
+            "INFERENCE_API_URL = https://custom-endpoint.a.run.app # endpoint\n",
+            encoding="utf-8",
+        )
         assert resolve_api_key() == "ul_from_dotenv"
+
+        from src.config import get_config, parse_dotenv
+        env_dict = parse_dotenv()
+        assert env_dict.get("INFERENCE_API_KEY") == "ul_from_dotenv"
+        assert env_dict.get("INFERENCE_API_URL") == "https://custom-endpoint.a.run.app"
+
+        monkeypatch.delenv("INFERENCE_API_URL", raising=False)
+        monkeypatch.delenv("SCHALE_INFERENCE_URL", raising=False)
+        cfg = get_config()
+        assert cfg.inference_api_key == "ul_from_dotenv"
+        assert cfg.inference_api_url == "https://custom-endpoint.a.run.app/predict"
     finally:
-        if dotenv_path.exists():
+        if original_dotenv_content is not None:
+            dotenv_path.write_text(original_dotenv_content, encoding="utf-8")
+        elif dotenv_path.exists():
             dotenv_path.unlink()
 
 

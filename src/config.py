@@ -39,6 +39,29 @@ def normalize_inference_url(raw_url: Optional[str]) -> str:
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, new_path, parts.query, parts.fragment))
 
 
+def parse_dotenv() -> dict:
+    """Helper to parse key-values from project-local .env file."""
+    values: dict = {}
+    try:
+        repo_root = Path(__file__).resolve().parent.parent
+        dotenv_path = repo_root / ".env"
+        if dotenv_path.exists():
+            with open(dotenv_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.split("#", 1)[0].strip().strip('"').strip("'")
+                        if k and v:
+                            values[k] = v
+    except Exception:
+        pass
+    return values
+
+
 def resolve_api_key() -> Optional[str]:
     """Resolves the inference API key securely from server-side sources.
     Priority:
@@ -57,23 +80,10 @@ def resolve_api_key() -> Optional[str]:
                 return cleaned_val if cleaned_val else None
 
     # 2. Local .env file check
-    try:
-        repo_root = Path(__file__).resolve().parent.parent
-        dotenv_path = repo_root / ".env"
-        if dotenv_path.exists():
-            with open(dotenv_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        k = k.strip()
-                        v = v.split("#", 1)[0].strip().strip('"').strip("'")
-                        if k in ("INFERENCE_API_KEY", "SCHALE_INFERENCE_KEY") and v:
-                            return v
-    except Exception:
-        pass
+    dotenv_vars = parse_dotenv()
+    for key_name in ("INFERENCE_API_KEY", "SCHALE_INFERENCE_KEY"):
+        if key_name in dotenv_vars and dotenv_vars[key_name]:
+            return dotenv_vars[key_name]
 
     # 3. Windows registry fallback (HKCU -> HKLM)
     if sys.platform == "win32":
@@ -119,14 +129,28 @@ class AppConfig:
 
 
 def get_config() -> AppConfig:
-    api_url = normalize_inference_url(
-        os.getenv("INFERENCE_API_URL") or os.getenv("SCHALE_INFERENCE_URL") or DEFAULT_INFERENCE_API_URL
+    dotenv_vars = parse_dotenv()
+    raw_url = (
+        os.getenv("INFERENCE_API_URL")
+        or os.getenv("SCHALE_INFERENCE_URL")
+        or dotenv_vars.get("INFERENCE_API_URL")
+        or dotenv_vars.get("SCHALE_INFERENCE_URL")
+        or DEFAULT_INFERENCE_API_URL
     )
+    api_url = normalize_inference_url(raw_url)
     api_key = resolve_api_key()
-    mock_mode = os.getenv("MOCK_INFERENCE", "false").lower() in ("1", "true", "yes")
-    timeout = float(os.getenv("INFERENCE_TIMEOUT_SEC", "30.0"))
-    host = os.getenv("SCHALE_HOST", "127.0.0.1")
-    port = int(os.getenv("SCHALE_PORT", "8000"))
+
+    mock_env = os.getenv("MOCK_INFERENCE")
+    if mock_env is None:
+        mock_env = dotenv_vars.get("MOCK_INFERENCE", "false")
+    mock_mode = mock_env.lower() in ("1", "true", "yes")
+
+    timeout_val = os.getenv("INFERENCE_TIMEOUT_SEC") or dotenv_vars.get("INFERENCE_TIMEOUT_SEC", "30.0")
+    timeout = float(timeout_val)
+
+    host = os.getenv("SCHALE_HOST") or dotenv_vars.get("SCHALE_HOST", "127.0.0.1")
+    port_val = os.getenv("SCHALE_PORT") or dotenv_vars.get("SCHALE_PORT", "8000")
+    port = int(port_val)
 
     return AppConfig(
         host=host,
