@@ -90,10 +90,15 @@ def test_predict_unconfigured_api_key(client, monkeypatch, sample_jpeg_bytes):
 
 def test_no_api_key_in_frontend_or_source():
     """Security Invariant: Verify that no hardcoded secret keys are present in source files, frontend, or docs."""
-    suspicious_patterns = [
-        "ul_sample_redacted_key_1",  # Exposed key from original HTML
-        "ul_sample_redacted_key_2",  # User inputted key
-    ]
+    import hashlib
+    import re
+
+    compromised_key_hashes = {
+        "689ce1224ea0d7acbc7434109ce6faf501edc0dbb323a8df0ffa4d8857630cd3",  # sha256 of historical key 1
+        "74c3b98bb203516f0e6350932ea12485f88acbe63b272cc4bd92fa10d57ce725",  # sha256 of historical key 2
+    }
+    token_pattern = re.compile(r"\bul_[A-Za-z0-9_]+\b")
+
     # We check src/, static/, and docs/
     repo_root = Path(__file__).resolve().parent.parent
     check_dirs = [repo_root / "src", repo_root / "static", repo_root / "docs"]
@@ -104,8 +109,11 @@ def test_no_api_key_in_frontend_or_source():
         for file_path in d.rglob("*"):
             if file_path.is_file() and file_path.suffix in (".py", ".js", ".html", ".json", ".md"):
                 text = file_path.read_text(encoding="utf-8", errors="ignore")
-                for pat in suspicious_patterns:
-                    assert pat not in text, f"Found exposed secret key in {file_path}: {pat}"
+                for token in token_pattern.findall(text):
+                    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+                    assert token_hash not in compromised_key_hashes, f"Found compromised secret key in {file_path}"
+                    if len(token) >= 40:
+                        assert False, f"Found raw platform API key token in {file_path}: {token[:6]}..."
 
 
 def test_export_yolo_endpoint_success_with_classes(client, sample_jpeg_bytes):
