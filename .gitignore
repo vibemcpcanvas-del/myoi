@@ -37,6 +37,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 .env
+.env.*
 .venv
 env/
 venv/
@@ -56,4 +57,5 @@ venv.bak/
 *.bin
 .system_generated/
 logs/
+*.log
 .server.pid
