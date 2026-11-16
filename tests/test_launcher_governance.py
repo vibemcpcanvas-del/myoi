@@ -42,8 +42,37 @@ def test_python_preflight_environment():
 
 
 def test_is_port_in_use_on_free_port():
-    """Verify free port detection accurately returns False."""
+    """Verify free port detection accurately returns False and handles 0.0.0.0 on Windows."""
     assert is_port_in_use("127.0.0.1", 59876) is False
+    # Connecting to 0.0.0.0 on Windows must not raise WinError 10049
+    assert is_port_in_use("0.0.0.0", 59876) is False
+
+
+def test_is_pid_listening_on_port_exact_match(monkeypatch):
+    """Verify is_pid_listening_on_port uses exact port match rather than substring match."""
+    from scripts.launcher import is_pid_listening_on_port
+
+    mock_netstat_output = (
+        "  Proto  Local Address          Foreign Address        State           PID\n"
+        "  TCP    0.0.0.0:8000           0.0.0.0:0              LISTENING       1234\n"
+        "  TCP    0.0.0.0:8080           0.0.0.0:0              LISTENING       5678\n"
+    )
+
+    class MockCompletedProcess:
+        stdout = mock_netstat_output
+        returncode = 0
+
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: MockCompletedProcess())
+
+    # Exact port 8000 on PID 1234 -> True
+    assert is_pid_listening_on_port(1234, 8000) is True
+    # Substring port 80 on PID 1234 -> False (must NOT match 8000)
+    assert is_pid_listening_on_port(1234, 80) is False
+    # Substring port 800 on PID 1234 -> False (must NOT match 8000)
+    assert is_pid_listening_on_port(1234, 800) is False
+    # Exact port 8080 on PID 5678 -> True
+    assert is_pid_listening_on_port(5678, 8080) is True
+
 
 
 def test_is_pid_running_lifecycle():

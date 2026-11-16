@@ -172,15 +172,23 @@ def validate_and_build_yolo_dataset(
 
     # 5. Image payload lookup and hash duplicate verification
     def resolve_image_bytes(img_path: str) -> bytes:
+        data = None
         if img_path in image_data_map:
-            return image_data_map[img_path]
-        fname = Path(img_path).name
-        if fname in image_data_map:
-            return image_data_map[fname]
-        for k, v in image_data_map.items():
-            if Path(k).name == fname:
-                return v
-        raise ValueError(f"Missing image payload for approved record: {img_path}")
+            data = image_data_map[img_path]
+        else:
+            fname = Path(img_path).name
+            if fname in image_data_map:
+                data = image_data_map[fname]
+            else:
+                for k, v in image_data_map.items():
+                    if Path(k).name == fname:
+                        data = v
+                        break
+        if data is None:
+            raise ValueError(f"Missing image payload for approved record: {img_path}")
+        if len(data) == 0:
+            raise ValueError(f"Image payload for approved record '{img_path}' is empty (0 bytes). Corrupt images cannot be exported.")
+        return data
 
     train_hashes: Dict[str, str] = {}
     for r in train_records:

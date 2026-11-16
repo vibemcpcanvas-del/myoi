@@ -411,4 +411,32 @@ def test_static_assets_serving(client):
     assert "javascript" in resp_static.headers.get("content-type", "").lower()
 
 
+def test_export_yolo_rejects_empty_zero_byte_image(client):
+    """Verify that export endpoints reject empty 0-byte images with HTTP 400."""
+    payload = {
+        "records": [
+            {
+                "recordId": "rec_empty",
+                "sessionId": "SES_EMPTY",
+                "imageFile": "images/empty.jpg",
+                "reviewStatus": "approved",
+                "originalWidth": 640,
+                "originalHeight": 640,
+                "detections": [],
+            }
+        ],
+        "images": {
+            "images/empty.jpg": "",  # 0-byte empty base64
+        },
+    }
+
+    # Test both /api/export-yolo and /api/yolo/export
+    for ep in ["/api/export-yolo", "/api/yolo/export"]:
+        resp = client.post(ep, json=payload)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["detail"]["error"] == "invalid_image_base64"
+
+
+
 

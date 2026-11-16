@@ -69,9 +69,10 @@ def check_python_environment() -> tuple[bool, str]:
 
 def is_port_in_use(host: str, port: int) -> bool:
     """Check if a network port is already in use."""
+    connect_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(1.0)
-        result = sock.connect_ex((host, port))
+        result = sock.connect_ex((connect_host, port))
         return result == 0
 
 
@@ -146,10 +147,13 @@ def is_pid_listening_on_port(pid: int, port: int) -> bool:
             )
             for line in res.stdout.splitlines():
                 line = line.strip()
-                if f":{port}" in line and "LISTENING" in line:
+                if "LISTENING" in line:
                     parts = line.split()
-                    if parts and parts[-1] == str(pid):
-                        return True
+                    if len(parts) >= 5 and parts[-1] == str(pid):
+                        local_addr = parts[1]
+                        local_port = local_addr.rsplit(":", 1)[-1]
+                        if local_port == str(port):
+                            return True
             return False
         except Exception:
             return False
@@ -254,7 +258,8 @@ def terminate_pid_safely(pid: int, port: int | None = None) -> bool:
 
 def check_health(host: str, port: int, timeout: float = 1.5) -> bool:
     """Query /health endpoint to verify real application readiness and valid payload."""
-    url = f"http://{host}:{port}/health"
+    connect_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    url = f"http://{connect_host}:{port}/health"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "SCHALE-Launcher/1.0"})
         with urllib.request.urlopen(req, timeout=timeout) as response:
@@ -270,7 +275,8 @@ def check_health(host: str, port: int, timeout: float = 1.5) -> bool:
 def open_browser_when_ready(host: str, port: int, max_wait: float = 15.0) -> None:
     """Background helper that polls health check and opens browser when online."""
     start_time = time.time()
-    url = f"http://{host}:{port}"
+    connect_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    url = f"http://{connect_host}:{port}"
     while time.time() - start_time < max_wait:
         if check_health(host, port, timeout=1.0):
             print(f"\n[안내] 서버 준비 완료! 웹 브라우저를 엽니다: {url}")
@@ -330,7 +336,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = get_config()
     host = args.host or config.host
     port = args.port or config.port
-    server_url = f"http://{host}:{port}"
+    connect_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    server_url = f"http://{connect_host}:{port}"
 
     print("========================================================================")
     print("  SCHALE 전투 추적 시스템 (myoi) 실행 중...")
@@ -393,7 +400,8 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     host = args.host or config.host
     port = args.port or config.port
-    server_url = f"http://{host}:{port}"
+    connect_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    server_url = f"http://{connect_host}:{port}"
 
     print("========================================================================")
     print("  [SCHALE TACTICAL TRACKING] 서버 시작 준비 중...")
@@ -451,6 +459,10 @@ def cmd_start(args: argparse.Namespace) -> int:
         stderr=subprocess.STDOUT,
         creationflags=creation_flags,
     )
+    try:
+        log_fp.close()
+    except Exception:
+        pass
 
     PID_FILE.write_text(str(proc.pid), encoding="utf-8")
     print(f"[*] 서버 프로세스가 시작되었습니다. (PID: {proc.pid})")
@@ -570,6 +582,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     config = get_config()
     host = args.host or config.host
     port = args.port or config.port
+    connect_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
 
     active_pid = get_active_server_pid(port=port)
     in_use = is_port_in_use(host, port)
@@ -578,7 +591,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     print("========================================================================")
     print("  SCHALE Tactical Tracking Server Status")
     print("========================================================================")
-    print(f"  - Target URL       : http://{host}:{port}")
+    print(f"  - Target URL       : http://{connect_host}:{port}")
     print(f"  - Active Server PID: {active_pid if active_pid else 'None (Not Running)'}")
     print(f"  - Port Listening   : {'YES' if in_use else 'NO'}")
     print(f"  - Health Endpoint  : {'ONLINE (200 OK)' if healthy else 'OFFLINE'}")

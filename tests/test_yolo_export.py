@@ -93,6 +93,27 @@ def test_10_export_fails_closed_when_zero_approved_images():
         validate_and_build_yolo_dataset(records, {})
 
 
+def test_export_fails_closed_on_zero_byte_image_payload():
+    """Verify that 0-byte corrupt image payload raises ValueError and halts export."""
+    records = [
+        {
+            "recordId": "rec_corrupt",
+            "sessionId": "SES_A",
+            "imageFile": "images/corrupt.jpg",
+            "reviewStatus": "approved",
+            "originalWidth": 640,
+            "originalHeight": 640,
+            "detections": [],
+        }
+    ]
+    image_data_map = {
+        "images/corrupt.jpg": b"",  # 0 bytes
+    }
+    with pytest.raises(ValueError, match="empty \\(0 bytes\\)"):
+        validate_and_build_yolo_dataset(records, image_data_map)
+
+
+
 def test_12_multi_session_train_val_split_and_no_leakage():
     """Requirement 10.12: Verify multi-session partition into train and val without session leakage."""
     img_a1 = create_dummy_jpeg(10)

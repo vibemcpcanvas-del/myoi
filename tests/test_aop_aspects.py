@@ -533,6 +533,25 @@ def test_frontend_aspects_in_node_runtime():
     }};
     if (aop.ReviewGateAspect.validateRecordForApproval(floatClassRec).valid) throw new Error('Float classId was not blocked');
 
+    // Edge case 4: Zero-byte image payload
+    const zeroByteRec = {{
+        coordinateSpace: 'letterbox_640',
+        originalWidth: 1920,
+        originalHeight: 1080,
+        origBase64: '',
+        reviewedAnnotations: []
+    }};
+    if (aop.ReviewGateAspect.validateRecordForApproval(zeroByteRec).valid) throw new Error('Zero byte image was not blocked');
+
+    // Edge case 5: Invalid image resolution (0x0 or negative)
+    const zeroDimRec = {{
+        coordinateSpace: 'letterbox_640',
+        originalWidth: 0,
+        originalHeight: 1080,
+        reviewedAnnotations: []
+    }};
+    if (aop.ReviewGateAspect.validateRecordForApproval(zeroDimRec).valid) throw new Error('Zero width was not blocked');
+
     // 5. Audit Trail Aspect
     const auditRec = {{ reviewStatus: 'pending' }};
     aop.AuditTrailAspect.recordDecision(auditRec, 'approved', 'operator_jane');

@@ -410,6 +410,8 @@ async def export_yolo_zip(request: Request):
             b64_str = b64_str.split(",", 1)[1]
         try:
             raw_bytes = base64.b64decode(b64_str)
+            if not raw_bytes or len(raw_bytes) == 0:
+                raise ValueError("Image base64 decoded to 0 bytes.")
             image_data_map[fname] = raw_bytes
             image_data_map[Path(fname).name] = raw_bytes
         except Exception as e:

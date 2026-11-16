@@ -121,6 +121,7 @@ def test_phase3_reviewer_transform_and_triage_engine_in_node():
         'tabCountRejected': {{ innerText: '' }}
     }};
 
+    const registeredListeners = {{}};
     const mockWindow = {{
         document: {{
             getElementById: (id) => elements[id] || null,
@@ -129,9 +130,15 @@ def test_phase3_reviewer_transform_and_triage_engine_in_node():
         }},
         Image: function() {{
             this.onload = null;
+            this.onerror = null;
             this.complete = true;
+            this.naturalWidth = 640;
+            this.naturalHeight = 480;
         }},
-        addEventListener: () => {{}},
+        addEventListener: (event, fn) => {{
+            registeredListeners[event] = registeredListeners[event] || [];
+            registeredListeners[event].push(fn);
+        }},
         ReviewManager: null
     }};
 
@@ -221,6 +228,61 @@ def test_phase3_reviewer_transform_and_triage_engine_in_node():
     rm.setDecision('approved');
     if (rm.currentRecordIndex !== 2) {{
         throw new Error(`Auto-advance on decision failed: expected 2, got ${{rm.currentRecordIndex}}`);
+    }}
+
+    // Test 7: Corrupt/Zero-byte image handling & fail-closed approval block
+    let alertMsg = null;
+    global.alert = mockWindow.alert = (msg) => {{ alertMsg = msg; }};
+    rm.records = [
+        {{ recordId: 'corrupt_1', reviewStatus: 'pending', origBase64: '', originalWidth: 640, originalHeight: 480, reviewedAnnotations: [] }},
+        {{ recordId: 'valid_2', reviewStatus: 'pending', origBase64: 'data:image/jpeg;base64,/9j/4AAQSkZJRg==', originalWidth: 640, originalHeight: 480, reviewedAnnotations: [] }}
+    ];
+    rm.setFilter('all');
+    rm.selectRecord(0);
+    if (!rm.imageLoadFailed) {{
+        throw new Error('Zero-byte base64 image should trigger imageLoadFailed');
+    }}
+    // Attempt to approve corrupt record must be blocked
+    rm.setDecision('approved');
+    if (rm.records[0].reviewStatus === 'approved') {{
+        throw new Error('Corrupt zero-byte image was illegally approved!');
+    }}
+    if (!alertMsg || !alertMsg.includes('승인 불가')) {{
+        throw new Error(`Expected fail-closed alert on corrupt image approval, got: ${{alertMsg}}`);
+    }}
+    // But rejection of corrupt frame must succeed
+    rm.setDecision('rejected');
+    if (rm.records[0].reviewStatus !== 'rejected') {{
+        throw new Error('Rejection of corrupt record should be allowed');
+    }}
+
+    // Test 8: Korean IME Hotkey Support ('ㅁ' for Approve, 'ㄱ' for Reject, 'ㅔ' for Pending)
+    rm.selectRecord(1);
+    const simulateKey = (key, code) => {{
+        const event = {{
+            key: key,
+            code: code,
+            preventDefault: () => {{}},
+        }};
+        (registeredListeners['keydown'] || []).forEach(fn => fn(event));
+    }};
+
+    // Press 'ㅁ' (KeyA in Korean IME) -> should approve record 1
+    simulateKey('ㅁ', 'KeyA');
+    if (rm.records[1].reviewStatus !== 'approved') {{
+        throw new Error(`Korean IME approval hotkey failed: ${{rm.records[1].reviewStatus}}`);
+    }}
+
+    // Press 'ㅔ' (KeyP in Korean IME) -> should mark record 1 pending
+    simulateKey('ㅔ', 'KeyP');
+    if (rm.records[1].reviewStatus !== 'pending') {{
+        throw new Error(`Korean IME pending hotkey failed: ${{rm.records[1].reviewStatus}}`);
+    }}
+
+    // Press 'ㄱ' (KeyR in Korean IME) -> should reject record 1
+    simulateKey('ㄱ', 'KeyR');
+    if (rm.records[1].reviewStatus !== 'rejected') {{
+        throw new Error(`Korean IME reject hotkey failed: ${{rm.records[1].reviewStatus}}`);
     }}
 
     console.log('ALL_NODE_TESTS_PASS');

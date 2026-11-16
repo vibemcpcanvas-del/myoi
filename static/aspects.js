@@ -246,9 +246,24 @@
                 };
             }
 
-            // Invariant 2: Bounding box geometric and boundary constraints
-            const origW = record.originalWidth || 1920;
-            const origH = record.originalHeight || 1080;
+            // Invariant 2: Image payload presence & non-empty data
+            const imageSrc = record.origBase64 !== undefined ? record.origBase64 : (record.prevBase64 !== undefined ? record.prevBase64 : record.imageFile);
+            if (imageSrc === '' || (typeof imageSrc === 'string' && imageSrc.startsWith('data:') && imageSrc.includes(',') && imageSrc.split(',')[1].trim() === '')) {
+                return {
+                    valid: false,
+                    error: '프레임 이미지 데이터가 0바이트로 비어 있어 승인할 수 없습니다.'
+                };
+            }
+
+            // Invariant 3: Bounding box geometric and boundary constraints
+            const origW = (record.originalWidth !== undefined) ? record.originalWidth : 1920;
+            const origH = (record.originalHeight !== undefined) ? record.originalHeight : 1080;
+            if (typeof origW !== 'number' || typeof origH !== 'number' || origW <= 0 || origH <= 0 || !Number.isFinite(origW) || !Number.isFinite(origH)) {
+                return {
+                    valid: false,
+                    error: `유효하지 않은 이미지 해상도입니다: (${origW}x${origH})`
+                };
+            }
             const boxes = record.reviewedAnnotations || record.detections || [];
 
             for (let i = 0; i < boxes.length; i++) {

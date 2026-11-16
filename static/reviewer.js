@@ -10,6 +10,16 @@
 (function (window) {
     'use strict';
 
+    function showAlert(msg) {
+        if (typeof alert !== 'undefined') {
+            alert(msg);
+        } else if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+            window.alert(msg);
+        } else {
+            console.warn('[Reviewer Alert]', msg);
+        }
+    }
+
     class ReviewManager {
         constructor() {
             this.records = []; // Array of snapshot candidate records
@@ -132,23 +142,24 @@
                 }
 
                 const k = e.key.toUpperCase();
+                const code = e.code;
 
-                // [A] Approve
-                if (k === 'A') {
+                // [A] Approve (supports English and Korean IME 'ㅁ')
+                if (k === 'A' || code === 'KeyA' || e.key === 'ㅁ') {
                     e.preventDefault();
                     this.setDecision('approved');
                     return;
                 }
 
-                // [R] Reject
-                if (k === 'R') {
+                // [R] Reject (supports English and Korean IME 'ㄱ')
+                if (k === 'R' || code === 'KeyR' || e.key === 'ㄱ') {
                     e.preventDefault();
                     this.setDecision('rejected');
                     return;
                 }
 
-                // [P] Pending
-                if (k === 'P') {
+                // [P] Pending (supports English and Korean IME 'ㅔ')
+                if (k === 'P' || code === 'KeyP' || e.key === 'ㅔ') {
                     e.preventDefault();
                     this.setDecision('pending');
                     return;
@@ -367,6 +378,7 @@
             this.currentRecordIndex = idx;
             this.selectedBoxIndex = -1;
             this.isAddingBox = false;
+            this.imageLoadFailed = false;
 
             const rec = this.records[idx];
             document.getElementById('inspectorMeta').innerText = 
@@ -427,13 +439,54 @@
             const rec = this.records[this.currentRecordIndex];
             if (!rec) return;
 
+            const targetIndex = this.currentRecordIndex;
             const imgSrc = (this.viewMode === 'prev' && rec.prevBase64) ? rec.prevBase64 : rec.origBase64;
+
+            if (imgSrc === '' || (typeof imgSrc === 'string' && imgSrc.startsWith('data:') && imgSrc.includes(',') && imgSrc.split(',')[1].trim() === '')) {
+                this.handleImageLoadError(targetIndex, '이미지 데이터가 0바이트로 비어 있습니다.');
+                return;
+            }
+
             this.imgElement.onload = () => {
-                this.canvas.width = rec.originalWidth;
-                this.canvas.height = rec.originalHeight;
+                if (this.currentRecordIndex !== targetIndex) return; // Prevent async race condition
+                this.imageLoadFailed = false;
+                if (rec.originalWidth && this.canvas) this.canvas.width = rec.originalWidth;
+                if (rec.originalHeight && this.canvas) this.canvas.height = rec.originalHeight;
                 this.drawCanvas();
             };
-            this.imgElement.src = imgSrc;
+
+            this.imgElement.onerror = () => {
+                if (this.currentRecordIndex !== targetIndex) return;
+                this.handleImageLoadError(targetIndex, '손상된 이미지 데이터 (디코딩 실패).');
+            };
+
+            if (imgSrc) {
+                this.imgElement.src = imgSrc;
+            } else {
+                this.imageLoadFailed = false;
+                this.drawCanvas();
+            }
+        }
+
+        handleImageLoadError(recordIdx, reason) {
+            this.imageLoadFailed = true;
+            const rec = this.records[recordIdx];
+            if (this.canvas && this.ctx) {
+                this.canvas.width = rec ? (rec.originalWidth || 640) : 640;
+                this.canvas.height = rec ? (rec.originalHeight || 360) : 360;
+                this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+                this.ctx.fillStyle = '#111827';
+                this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+                this.ctx.fillStyle = '#ef4444';
+                this.ctx.font = 'bold 14px monospace';
+                this.ctx.textAlign = 'center';
+                this.ctx.textBaseline = 'middle';
+                this.ctx.fillText(`[이미지 오류: ${reason}]`, this.canvas.width / 2, this.canvas.height / 2);
+            }
+            const meta = document.getElementById('inspectorMeta');
+            if (meta) {
+                meta.innerText = `[로드 오류] ${reason}`;
+            }
         }
 
         drawTacticalBox(x, y, w, h, opt) {
@@ -538,7 +591,9 @@
         }
 
         drawCanvas() {
-            if (!this.ctx || !this.imgElement.complete) return;
+            if (!this.ctx) return;
+            if (this.imageLoadFailed) return;
+            if (this.imgElement.src && (!this.imgElement.complete || this.imgElement.naturalWidth === 0)) return;
             const rec = this.records[this.currentRecordIndex];
             if (!rec) return;
 
@@ -550,8 +605,10 @@
             this.ctx.translate(this.view.panX, this.view.panY);
             this.ctx.scale(this.view.scale, this.view.scale);
 
-            // Draw image at (0, 0) in full resolution
-            this.ctx.drawImage(this.imgElement, 0, 0);
+            // Draw image at (0, 0) in full resolution if valid
+            if (this.imgElement.complete && this.imgElement.naturalWidth > 0) {
+                this.ctx.drawImage(this.imgElement, 0, 0);
+            }
 
             if (this.viewMode === 'orig') {
                 this.updateZoomBadge();
@@ -855,7 +912,7 @@
                 }
                 const newId = parseInt(newIdStr, 10);
                 if (isNaN(newId) || newId < 0) {
-                    alert('유효하지 않은 클래스 ID입니다. 0 이상의 정수를 입력해야 합니다.');
+                    showAlert('유효하지 않은 클래스 ID입니다. 0 이상의 정수를 입력해야 합니다.');
                     this.updateClassSelectDropdown();
                     return;
                 }
@@ -893,28 +950,32 @@
             if (!rec) return;
 
             if (status === 'approved') {
+                if (this.imageLoadFailed || rec.origBase64 === '') {
+                    showAlert('승인 불가: 이미지를 불러올 수 없거나 0바이트로 손상된 프레임은 학습 데이터로 승인할 수 없습니다.');
+                    return;
+                }
                 // AOP Aspect 4: Boundary & Coordinate Invariant Gate
                 if (typeof window !== 'undefined' && window.SchaleAOP && window.SchaleAOP.ReviewGateAspect) {
                     const check = window.SchaleAOP.ReviewGateAspect.validateRecordForApproval(rec);
                     if (!check.valid) {
-                        alert(`승인 불가: ${check.error}`);
+                        showAlert(`승인 불가: ${check.error}`);
                         return;
                     }
                 } else {
                     // Fallback inline verification
                     if (rec.coordinateSpace === 'unknown' || rec.coordinateTransformStatus === 'unverified') {
-                        alert('승인 불가: 좌표계가 검증되지 않았거나(unknown) 변환에 실패한 프레임은 학습용 라벨로 승인할 수 없습니다.');
+                        showAlert('승인 불가: 좌표계가 검증되지 않았거나(unknown) 변환에 실패한 프레임은 학습용 라벨로 승인할 수 없습니다.');
                         return;
                     }
                     const boxes = rec.reviewedAnnotations || [];
                     for (let i = 0; i < boxes.length; i++) {
                         const b = boxes[i].box;
                         if (b.x2 <= b.x1 || b.y2 <= b.y1 || b.x1 < 0 || b.y1 < 0 || b.x2 > rec.originalWidth || b.y2 > rec.originalHeight) {
-                            alert(`승인 불가: 박스 [${i + 1}]의 좌표가 비정상입니다. (x1:${b.x1}, y1:${b.y1}, x2:${b.x2}, y2:${b.y2})`);
+                            showAlert(`승인 불가: 박스 [${i + 1}]의 좌표가 비정상입니다. (x1:${b.x1}, y1:${b.y1}, x2:${b.x2}, y2:${b.y2})`);
                             return;
                         }
                         if (typeof boxes[i].classId !== 'number' || boxes[i].classId < 0) {
-                            alert(`승인 불가: 박스 [${i + 1}]의 클래스 ID(${boxes[i].classId})가 비정상입니다.`);
+                            showAlert(`승인 불가: 박스 [${i + 1}]의 클래스 ID(${boxes[i].classId})가 비정상입니다.`);
                             return;
                         }
                     }
