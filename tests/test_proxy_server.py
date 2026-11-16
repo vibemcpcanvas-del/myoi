@@ -367,3 +367,48 @@ def test_upstream_401_redacts_secret_in_error(client, monkeypatch, sample_jpeg_b
     assert "[REDACTED]" in err["detail"]["message"]
 
 
+def test_export_yolo_alias_endpoint(client, sample_jpeg_bytes):
+    """Verify /api/yolo/export route alias functions identically to /api/export-yolo."""
+    import base64
+    import zipfile
+
+    b64_img = base64.b64encode(sample_jpeg_bytes).decode("utf-8")
+    payload = {
+        "records": [
+            {
+                "recordId": "rec_alias_1",
+                "sessionId": "SES_ALIAS",
+                "imageFile": "images/frame_alias.jpg",
+                "reviewStatus": "approved",
+                "originalWidth": 640,
+                "originalHeight": 640,
+                "detections": [{"classId": 0, "className": "Target", "box": {"x1": 20, "y1": 20, "x2": 100, "y2": 100}}],
+            }
+        ],
+        "images": {
+            "images/frame_alias.jpg": f"data:image/jpeg;base64,{b64_img}",
+        },
+    }
+
+    resp = client.post("/api/yolo/export", json=payload)
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        namelist = zf.namelist()
+        assert "data.yaml" in namelist
+        assert "labels/train/frame_alias.txt" in namelist
+
+
+def test_static_assets_serving(client):
+    """Verify static assets and root endpoint return correct HTML and static files."""
+    resp_root = client.get("/")
+    assert resp_root.status_code == 200
+    assert "text/html" in resp_root.headers.get("content-type", "")
+
+    resp_static = client.get("/static/app.js")
+    assert resp_static.status_code == 200
+    assert "javascript" in resp_static.headers.get("content-type", "").lower()
+
+
+

@@ -385,6 +385,7 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
 
 
 @app.post("/api/export-yolo")
+@app.post("/api/yolo/export")
 @measure_telemetry(metric_name="api_export_yolo")
 async def export_yolo_zip(request: Request):
     """Generates an Ultralytics YOLO detect format dataset ZIP archive from reviewed records."""
