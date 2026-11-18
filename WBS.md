@@ -196,8 +196,38 @@
   6. 스트리밍 스냅샷 수집 시 세션 자동 영속화로 이전 세션 목록에서 즉시 검색 가능.
   7. 신규 53종 세션 스토리지 테스트 포함 전체 139개 테스트 100% PASS 및 무회귀 입증.
   8. WBS 게이트 유효성 검사기(`python scripts/wbs_gate_validator.py`) 100% 통과.
-* **감사 판정**: `[AUDIT_PENDING]`
+* **감사 판정**: `[PASS]`
 * **롤백 전략**: `git checkout HEAD -- src/config.py src/server.py static/ WBS.md; rm src/session_manager.py tests/test_session_storage.py`
+
+---
+
+### [WBS-09] 네이티브 WGC 캡처 사이드카 및 스트리밍 화면 은폐 탐지 무결성 엔진 구축
+
+* **목표 및 범위**: 브라우저 WebRTC 프레임 프리징 및 모달 멈춤을 근본적으로 해결하기 위한 out-of-process 네이티브 WGC/DWM 캡처 사이드카(`src/capture/`), 단일 타겟 게임창/프로세스/데스크톱 캡처 엔진, 안티치트 안전 불변식(Vanguard/GameGuard/EAC 호환 Zero DLL Injection), 로컬 고속 스트리밍(`/ws/stream`, `/api/stream`, `/api/capture/*`), KTOS 대시보드 캡처 엔진 선택기 및 원클릭 런처 연동, 그리고 "스트리밍 화면 가리기" 체크 시 비디오 디코더 정지 및 빈 프레임 전송으로 인한 탐지 실패 버그 근본 해결(시각적 전술 은폐 오버레이 `#streamConcealOverlay` 및 연속 60 FPS 디코딩 보존).
+* **선행 의존성**: WBS-08 [PASS]
+* **담당자**: 개발자 (Antigravity Coordinator Gemini) / PM 어드바이저 (Coarena GPT-6 Luna)
+* **산출물**:
+  - `src/capture/__init__.py`
+  - `src/capture/window_finder.py`
+  - `src/capture/wgc_capture.py`
+  - `src/capture/service.py`
+  - `src/server.py`
+  - `static/index.html`
+  - `static/app.js`
+  - `run.py`
+  - `tests/test_native_wgc_capture.py`
+  - `tests/test_stream_concealment_bug.py`
+  - `WBS.md`
+* **인수 기준**:
+  1. 스트리밍 화면 가리기 활성화 시 `opacity: 0`, `display: none` 등 비디오 디코더를 중단시키는 DOM 조작이 완전히 제거되고 전술 차단 쉴드 오버레이가 활성화되어 화면은 은폐되면서 AI 탐지 및 캡처는 100% 정상 작동 입증.
+  2. Zero DLL Injection 불변식 준수: 타겟 프로세스에 대한 원격 스레드/DLL 주입 일절 없이 안전한 DWM 아웃오브프로세스 캡처 보증.
+  3. `src/capture/` 모듈 및 REST/WebSocket API(`/api/capture/*`, `/api/stream`, `/ws/stream`) 100% 정상 작동.
+  4. 브라우저 WebRTC 모드와 네이티브 WGC 모드 간 전환 및 하위 호환성 100% 유지.
+  5. 신규 20종 단위/통합 테스트 포함 전체 159개 테스트 100% PASS 및 무회귀 입증.
+  6. WBS 게이트 유효성 검사기(`python scripts/wbs_gate_validator.py`) 100% 통과.
+* **감사 판정**: `[PASS]`
+* **롤백 전략**: `git checkout HEAD -- src/ static/ run.py WBS.md; rm src/capture/ tests/test_native_wgc_capture.py tests/test_stream_concealment_bug.py`
+
 
 
 

@@ -283,8 +283,58 @@
 
             <!-- video uses object-contain so NO clipping occurs -->
             <video id="vid" autoplay playsinline muted class="w-full h-full object-contain transition-opacity duration-300"></video>
+            <!-- Native WGC Canvas: Renders out-of-process game frames without browser freezing -->
+            <canvas id="wgcCanvas" class="w-full h-full object-contain transition-opacity duration-300 hidden"></canvas>
+
+            <!-- Tactical Privacy Shield (스트리밍 화면 은폐 모드) -->
+            <div id="streamConcealOverlay" class="absolute inset-0 bg-[#0b0f19] z-10 flex flex-col items-center justify-center text-center p-6 select-none transition-all duration-200" style="display: none;">
+                <div class="w-16 h-16 rounded-full bg-blue-950/80 border-2 border-[var(--p)] flex items-center justify-center mb-3 shadow-[0_0_20px_rgba(18,116,196,0.5)]">
+                    <span class="text-3xl">🔒</span>
+                </div>
+                <div class="text-lg font-black text-white tracking-wider mb-1 flex items-center gap-2">
+                    <span>TACTICAL STREAM CONCEALED</span>
+                    <span class="text-[10px] bg-blue-600 text-white px-2 py-0.5 rounded font-mono font-bold animate-pulse">ACTIVE</span>
+                </div>
+                <div class="text-xs text-blue-200/90 font-medium max-w-sm mb-3">
+                    스트리밍 화면은 안전하게 은폐되었으며, 백그라운드 실시간 AI 감지 및 좌표 추적 루프는 정상 속도(Full FPS)로 계속 가동 중입니다.
+                </div>
+                <div class="flex flex-wrap justify-center gap-3 text-[11px] font-mono text-gray-300 bg-black/50 px-3 py-1.5 rounded border border-gray-700">
+                    <span>디코더: <strong class="text-green-400">정상 작동 (60 FPS)</strong></span>
+                    <span>추론: <strong class="text-blue-400">실시간 연동</strong></span>
+                    <span>좌표계: <strong class="text-sky-400">Letterbox 640</strong></span>
+                </div>
+            </div>
+
             <!-- canvas matches the displayed video area -->
-            <canvas id="cvs" class="absolute inset-0 w-full h-full pointer-events-none"></canvas>
+            <canvas id="cvs" class="absolute inset-0 w-full h-full pointer-events-none z-20"></canvas>
+        </div>
+
+        <!-- 캡처 엔진 소스 선택기 (WGC 네이티브 사이드카 vs 브라우저 WebRTC) -->
+        <div class="bg-gray-100 dark:bg-[#1e293b] p-3 rounded-lg border border-gray-200 dark:border-gray-700 mt-1">
+            <div class="flex justify-between items-center mb-2">
+                <span class="text-xs font-black text-[var(--p)] flex items-center gap-1">
+                    <span>⚡</span> 캡처 엔진 선택
+                </span>
+                <div class="flex gap-1 text-[11px] font-bold">
+                    <button type="button" id="tabSourceWgc" class="px-2.5 py-1 rounded bg-[var(--p)] text-white shadow-sm transition-all">네이티브 WGC (권장)</button>
+                    <button type="button" id="tabSourceWebRTC" class="px-2.5 py-1 rounded bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 transition-all">브라우저 WebRTC</button>
+                </div>
+            </div>
+
+            <!-- WGC Window Selection Controls -->
+            <div id="wgcControls" class="flex flex-col gap-2">
+                <div class="flex gap-2 items-center">
+                    <select id="selWgcWindow" class="flex-1 bg-white dark:bg-[#0f172a] border border-gray-300 dark:border-gray-600 text-gray-800 dark:text-gray-100 text-xs font-bold rounded p-1.5 focus:outline-none focus:border-[var(--p)]">
+                        <option value="0">전체 데스크톱 (Screen Desktop)</option>
+                    </select>
+                    <button id="btnRefreshWindows" type="button" class="ba-btn h-8 px-2.5 text-xs whitespace-nowrap" title="활성 창 목록 새로고침">
+                        <span>🔄 새로고침</span>
+                    </button>
+                </div>
+                <div class="text-[10px] text-gray-500 dark:text-gray-400 font-medium flex items-center gap-1">
+                    <span>🛡️</span> <strong>Zero DLL Injection</strong>: Vanguard·GameGuard·EAC 호환 안전한 DWM 아웃오브프로세스 캡처
+                </div>
+            </div>
         </div>
 
         <!-- Control Buttons -->
@@ -329,7 +379,7 @@
             <!-- 시각/청각 통제 옵션 -->
             <div class="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700 space-y-2">
                 <label class="ba-check cursor-pointer flex items-center text-xs font-bold text-gray-700 dark:text-gray-300">
-                    <input type="checkbox" id="chkHideVid"><span class="chk"></span>스트리밍 화면 가리기
+                    <input type="checkbox" id="chkHideVid" data-alias="chkHideStream"><span class="chk"></span>스트리밍 화면 가리기
                 </label>
                 <label class="ba-check cursor-pointer flex items-center text-xs font-bold text-gray-700 dark:text-gray-300">
                     <input type="checkbox" id="chkBeep" checked><span class="chk"></span>즉각 경고음 (Beep) 켜기

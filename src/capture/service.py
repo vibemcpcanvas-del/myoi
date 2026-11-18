@@ -1,0 +1,256 @@
+"""src/capture/service.py
+Capture Service coordinator for SCHALE Tactical Tracking.
+Manages asynchronous background capture workers, thread-safe frame buffers,
+FPS regulation, and real-time streaming to WebSocket/HTTP consumers.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+import logging
+import threading
+import time
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+from PIL import Image
+
+from src.capture.window_finder import WindowFinder, WindowInfo
+from src.capture.wgc_capture import NativeCaptureEngine
+
+logger = logging.getLogger("schale.capture")
+
+
+@dataclass
+class CaptureTelemetry:
+    fps: float = 0.0
+    total_frames: int = 0
+    dropped_frames: int = 0
+    avg_latency_ms: float = 0.0
+    last_frame_timestamp: float = 0.0
+    status: str = "idle"
+    target_window: Optional[Dict[str, Any]] = None
+    backend: str = "none"
+
+
+class CaptureService:
+    """Manages continuous background frame capture and distribution."""
+
+    def __init__(self, mock_mode: bool = False):
+        self.mock_mode = mock_mode
+        self.finder = WindowFinder(mock_mode=mock_mode)
+        self.engine = NativeCaptureEngine(mock_mode=mock_mode)
+
+        self._lock = threading.Lock()
+        self._is_running = False
+        self._target_hwnd: int = 0
+        self._target_info: Optional[WindowInfo] = None
+        self._target_fps: int = 20
+        self._quality: int = 80
+
+        self._worker_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+
+        # Thread-safe latest frame cache
+        self._latest_image: Optional[Image.Image] = None
+        self._latest_jpeg: Optional[bytes] = None
+        self._latest_meta: Dict[str, Any] = {}
+
+        # Telemetry
+        self._telemetry = CaptureTelemetry()
+        self._frame_times: List[float] = []
+
+        # Listeners / async queues for frame broadcast
+        self._async_queues: Set[asyncio.Queue] = set()
+
+    @property
+    def is_running(self) -> bool:
+        return self._is_running
+
+    def get_status(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "running": self._is_running,
+                "status": self._telemetry.status,
+                "targetHwnd": self._target_hwnd,
+                "targetWindow": self._target_info.to_dict() if self._target_info else None,
+                "targetFps": self._target_fps,
+                "actualFps": round(self._telemetry.fps, 1),
+                "totalFrames": self._telemetry.total_frames,
+                "avgLatencyMs": round(self._telemetry.avg_latency_ms, 2),
+                "backend": self._telemetry.backend,
+                "lastFrameTimestamp": self._telemetry.last_frame_timestamp,
+            }
+
+    def list_windows(self) -> List[Dict[str, Any]]:
+        windows = self.finder.list_windows()
+        return [w.to_dict() for w in windows]
+
+    def start_capture(
+        self,
+        target: int | str = 0,
+        fps: int = 20,
+        quality: int = 80,
+    ) -> Dict[str, Any]:
+        """Starts background window or desktop capture."""
+        with self._lock:
+            if self._is_running:
+                self._stop_worker_locked()
+
+            # Resolve target
+            target_hwnd = 0
+            target_info = None
+
+            if target != 0 and target != "0" and target != "desktop":
+                found = self.finder.find_window(target)
+                if found:
+                    target_hwnd = found.hwnd
+                    target_info = found
+                elif isinstance(target, int):
+                    target_hwnd = target
+                elif str(target).isdigit():
+                    target_hwnd = int(target)
+                else:
+                    return {
+                        "success": False,
+                        "error": "target_window_not_found",
+                        "message": f"Target window matching '{target}' was not found.",
+                    }
+
+            self._target_hwnd = target_hwnd
+            self._target_info = target_info
+            self._target_fps = max(1, min(fps, 60))
+            self._quality = max(10, min(quality, 100))
+            self._stop_event.clear()
+            self._is_running = True
+            self._telemetry.status = "capturing"
+            self._telemetry.target_window = target_info.to_dict() if target_info else None
+
+            self._worker_thread = threading.Thread(
+                target=self._capture_worker_loop,
+                name="schale-wgc-worker",
+                daemon=True,
+            )
+            self._worker_thread.start()
+
+            return {
+                "success": True,
+                "targetHwnd": self._target_hwnd,
+                "targetTitle": target_info.title if target_info else "전체 데스크톱",
+                "fps": self._target_fps,
+            }
+
+    def stop_capture(self) -> Dict[str, Any]:
+        with self._lock:
+            self._stop_worker_locked()
+            return {"success": True, "status": "stopped"}
+
+    def _stop_worker_locked(self) -> None:
+        self._is_running = False
+        self._stop_event.set()
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=1.0)
+        self._worker_thread = None
+        self._telemetry.status = "stopped"
+
+    def get_latest_frame(self) -> Tuple[Optional[bytes], Dict[str, Any]]:
+        with self._lock:
+            return self._latest_jpeg, dict(self._latest_meta)
+
+    def get_latest_image(self) -> Optional[Image.Image]:
+        with self._lock:
+            return self._latest_image.copy() if self._latest_image else None
+
+    def register_async_queue(self, queue: asyncio.Queue) -> None:
+        with self._lock:
+            self._async_queues.add(queue)
+
+    def unregister_async_queue(self, queue: asyncio.Queue) -> None:
+        with self._lock:
+            self._async_queues.discard(queue)
+
+    def _capture_worker_loop(self) -> None:
+        """Continuous capture loop running on dedicated worker thread."""
+        interval = 1.0 / float(self._target_fps)
+        latencies: List[float] = []
+
+        while not self._stop_event.is_set():
+            t0 = time.perf_counter()
+
+            try:
+                img, meta = self.engine.capture_frame(self._target_hwnd)
+
+                if img is not None:
+                    jpeg_bytes = self.engine.encode_jpeg(img, quality=self._quality)
+                    now = time.time()
+
+                    with self._lock:
+                        self._latest_image = img
+                        self._latest_jpeg = jpeg_bytes
+                        self._latest_meta = meta
+                        self._telemetry.total_frames += 1
+                        self._telemetry.last_frame_timestamp = now
+                        self._telemetry.backend = meta.get("backend", "unknown")
+
+                        # Track FPS
+                        self._frame_times.append(now)
+                        cutoff = now - 2.0
+                        self._frame_times = [t for t in self._frame_times if t >= cutoff]
+                        if len(self._frame_times) > 1:
+                            duration = self._frame_times[-1] - self._frame_times[0]
+                            self._telemetry.fps = (len(self._frame_times) - 1) / max(0.001, duration)
+
+                        # Track Latency
+                        elapsed = meta.get("elapsed_ms", 0.0)
+                        latencies.append(elapsed)
+                        if len(latencies) > 30:
+                            latencies.pop(0)
+                        self._telemetry.avg_latency_ms = sum(latencies) / max(1, len(latencies))
+
+                    # Broadcast to async WebSocket queues
+                    self._dispatch_frame_to_queues(jpeg_bytes, meta)
+                else:
+                    status = meta.get("status", "capture_error")
+                    with self._lock:
+                        self._telemetry.status = status
+                        self._telemetry.dropped_frames += 1
+            except Exception as e:
+                logger.warning(f"Error in capture worker loop: {e}")
+                with self._lock:
+                    self._telemetry.status = "error"
+                    self._telemetry.dropped_frames += 1
+
+            # Regulate FPS sleep
+            calc_time = time.perf_counter() - t0
+            sleep_time = interval - calc_time
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+    def _dispatch_frame_to_queues(self, jpeg_bytes: bytes, meta: Dict[str, Any]) -> None:
+        """Dispatches captured frame payload to registered asyncio queues non-blockingly."""
+        with self._lock:
+            queues = list(self._async_queues)
+
+        for q in queues:
+            try:
+                if q.full():
+                    try:
+                        q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                q.put_nowait((jpeg_bytes, meta))
+            except Exception:
+                pass
+
+
+# Global Singleton Service
+_GLOBAL_CAPTURE_SERVICE: Optional[CaptureService] = None
+_CAPTURE_LOCK = threading.Lock()
+
+
+def get_capture_service(mock_mode: bool = False) -> CaptureService:
+    global _GLOBAL_CAPTURE_SERVICE
+    with _CAPTURE_LOCK:
+        if _GLOBAL_CAPTURE_SERVICE is None:
+            _GLOBAL_CAPTURE_SERVICE = CaptureService(mock_mode=mock_mode)
+        return _GLOBAL_CAPTURE_SERVICE

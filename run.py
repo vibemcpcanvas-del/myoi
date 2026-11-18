@@ -34,6 +34,14 @@ def cmd_status(args):
     print("-" * 60)
 
     try:
+        from src.capture import WindowFinder
+        finder = WindowFinder(mock_mode=config.mock_inference)
+        wins = finder.list_windows()
+        print(f"Native WGC Sidecar:   ACTIVE ({len(wins)} capturable windows discovered)")
+    except Exception as e:
+        print(f"Native WGC Sidecar:   UNAVAILABLE ({e})")
+
+    try:
         packages = validator.validate_wbs_ledger()
         print(f"WBS Ledger Status:    VALID ({len(packages)} packages tracked)")
         for pkg_id, info in packages.items():
@@ -67,6 +75,32 @@ def cmd_test(args):
     sys.exit(result.returncode)
 
 
+def cmd_capture(args):
+    """Enumerate or test capture on active game windows."""
+    from src.capture import WindowFinder, NativeCaptureEngine
+    print("=" * 60)
+    print("SCHALE Native WGC / Desktop Window Capture")
+    print("=" * 60)
+
+    finder = WindowFinder()
+    if args.list:
+        windows = finder.list_windows()
+        print(f"Discovered {len(windows)} visible windows:")
+        for w in windows:
+            print(f"  [{w.hwnd}] {w.title} ({w.process_name}) {w.width}x{w.height}")
+        return
+
+    target = args.window or 0
+    engine = NativeCaptureEngine()
+    print(f"[*] Capturing frame for target: {target}")
+    img, meta = engine.capture_frame(int(target) if str(target).isdigit() else target)
+    print("Capture Result Meta:", meta)
+    if img:
+        print(f"Successfully captured image: size={img.size}, mode={img.mode}")
+    else:
+        print("[!] Capture returned no image.")
+
+
 def cmd_validate_wbs(args):
     """Validate WBS state ledger invariants."""
     import scripts.wbs_gate_validator as validator
@@ -98,6 +132,12 @@ def main():
     p_test = subparsers.add_parser("test", help="Run targeted test file")
     p_test.add_argument("target", nargs="?", default="tests/test_governance_invariants.py", help="Test file path")
     p_test.set_defaults(func=cmd_test)
+
+    # capture
+    p_capture = subparsers.add_parser("capture", help="Enumerate or capture game windows")
+    p_capture.add_argument("--list", action="store_true", help="List capturable windows")
+    p_capture.add_argument("--window", default=0, help="Target HWND or window name")
+    p_capture.set_defaults(func=cmd_capture)
 
     # validate-wbs
     p_val = subparsers.add_parser("validate-wbs", help="Run WBS gate invariant verification")

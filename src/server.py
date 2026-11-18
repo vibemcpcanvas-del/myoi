@@ -6,6 +6,8 @@ are decoupled using Aspect-Oriented Programming (AOP).
 """
 
 from contextlib import asynccontextmanager
+import asyncio
+import json
 import os
 from pathlib import Path
 import sys
@@ -17,9 +19,9 @@ _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
 
@@ -36,6 +38,7 @@ from src.aspects.telemetry import (
     default_telemetry_collector,
     measure_telemetry,
 )
+from src.capture import CaptureService, get_capture_service, WindowFinder
 from src.config import AppConfig, get_config
 from src.multipart_parser import parse_multipart_body
 from src.session_manager import SessionManager, get_session_manager
@@ -57,6 +60,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        try:
+            capture_svc = get_capture_service()
+            if capture_svc.is_running:
+                capture_svc.stop_capture()
+        except Exception:
+            pass
+
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             try:
                 if PID_FILE.exists():
@@ -106,6 +116,7 @@ async def get_system_status() -> Dict[str, Any]:
         "defaultCoordinateSpace": "letterbox_640",
         "circuitBreaker": default_inference_circuit_breaker.get_telemetry(),
         "telemetry": default_telemetry_collector.get_metrics(),
+        "capture": get_capture_service(mock_mode=config.mock_inference).get_status(),
     }
 
 
@@ -595,6 +606,187 @@ async def get_session_image_endpoint(session_id: str, filename: str):
         media_type = "image/webp"
 
     return FileResponse(img_path, media_type=media_type)
+
+
+# =====================================================================
+# Native WGC / DWM Capture Sidecar Endpoints
+# =====================================================================
+
+@app.get("/api/capture/windows")
+@measure_telemetry(metric_name="api_capture_windows")
+async def list_capturable_windows() -> Dict[str, Any]:
+    """Lists discoverable visible windows on the active desktop."""
+    cfg = get_config()
+    capture_svc = get_capture_service(mock_mode=cfg.mock_inference)
+    windows = capture_svc.list_windows()
+    return {"windows": windows, "count": len(windows)}
+
+
+@app.post("/api/capture/start")
+@measure_telemetry(metric_name="api_capture_start")
+async def start_capture_endpoint(request: Request) -> Dict[str, Any]:
+    """Starts out-of-process capture for the target window or desktop."""
+    cfg = get_config()
+    capture_svc = get_capture_service(mock_mode=cfg.mock_inference)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    target = body.get("target") or body.get("hwnd") or 0
+    fps = int(body.get("fps") or 20)
+    quality = int(body.get("quality") or 80)
+
+    result = capture_svc.start_capture(target=target, fps=fps, quality=quality)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result,
+        )
+    return result
+
+
+@app.post("/api/capture/stop")
+@measure_telemetry(metric_name="api_capture_stop")
+async def stop_capture_endpoint() -> Dict[str, Any]:
+    """Stops the active capture session."""
+    cfg = get_config()
+    capture_svc = get_capture_service(mock_mode=cfg.mock_inference)
+    return capture_svc.stop_capture()
+
+
+@app.get("/api/capture/status")
+@measure_telemetry(metric_name="api_capture_status")
+async def get_capture_status_endpoint() -> Dict[str, Any]:
+    """Returns real-time telemetry and state of the capture sidecar."""
+    cfg = get_config()
+    capture_svc = get_capture_service(mock_mode=cfg.mock_inference)
+    return capture_svc.get_status()
+
+
+@app.get("/api/capture/frame")
+async def get_capture_frame_endpoint():
+    """Retrieves the latest captured frame as JPEG."""
+    cfg = get_config()
+    capture_svc = get_capture_service(mock_mode=cfg.mock_inference)
+    jpeg_bytes, meta = capture_svc.get_latest_frame()
+
+    if not jpeg_bytes:
+        img, meta = capture_svc.engine.capture_frame(0)
+        if img:
+            jpeg_bytes = capture_svc.engine.encode_jpeg(img)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"error": "no_frame_available", "meta": meta},
+            )
+
+    return Response(content=jpeg_bytes, media_type="image/jpeg")
+
+
+async def _mjpeg_stream_generator(capture_svc: CaptureService):
+    """Asynchronous generator streaming live JPEG frames with multipart boundary."""
+    queue: asyncio.Queue = asyncio.Queue(maxsize=3)
+    capture_svc.register_async_queue(queue)
+    try:
+        while True:
+            try:
+                frame_bytes, _ = await asyncio.wait_for(queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                frame_bytes, _ = capture_svc.get_latest_frame()
+                if not frame_bytes:
+                    await asyncio.sleep(0.05)
+                    continue
+
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                b"Content-Length: " + str(len(frame_bytes)).encode("ascii") + b"\r\n\r\n"
+                + frame_bytes
+                + b"\r\n"
+            )
+    except (asyncio.CancelledError, GeneratorExit):
+        pass
+    finally:
+        capture_svc.unregister_async_queue(queue)
+
+
+@app.get("/api/stream")
+async def get_mjpeg_stream():
+    """Live MJPEG video stream route (multipart/x-mixed-replace)."""
+    cfg = get_config()
+    capture_svc = get_capture_service(mock_mode=cfg.mock_inference)
+    if not capture_svc.is_running:
+        capture_svc.start_capture(target=0, fps=20)
+
+    return StreamingResponse(
+        _mjpeg_stream_generator(capture_svc),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.websocket("/ws/stream")
+@app.websocket("/api/stream/ws")
+async def websocket_stream_endpoint(websocket: WebSocket):
+    """High-throughput, low-latency WebSocket stream for native frames."""
+    await websocket.accept()
+    cfg = get_config()
+    capture_svc = get_capture_service(mock_mode=cfg.mock_inference)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=3)
+    capture_svc.register_async_queue(queue)
+
+    async def sender_task():
+        try:
+            while True:
+                try:
+                    frame_bytes, meta = await asyncio.wait_for(queue.get(), timeout=0.2)
+                    if frame_bytes:
+                        await websocket.send_bytes(frame_bytes)
+                except asyncio.TimeoutError:
+                    if websocket.client_state.name != "CONNECTED":
+                        break
+        except (asyncio.CancelledError, WebSocketDisconnect):
+            pass
+        except Exception:
+            pass
+
+    sender = asyncio.create_task(sender_task())
+
+    try:
+        while True:
+            msg = await websocket.receive_text()
+            try:
+                payload = json.loads(msg)
+                action = payload.get("action") or payload.get("type")
+                if action == "list_windows":
+                    windows = capture_svc.list_windows()
+                    await websocket.send_json({"type": "windows", "data": windows})
+                elif action == "start":
+                    target = payload.get("target") or payload.get("hwnd") or 0
+                    fps = int(payload.get("fps") or 20)
+                    quality = int(payload.get("quality") or 80)
+                    res = capture_svc.start_capture(target=target, fps=fps, quality=quality)
+                    await websocket.send_json({"type": "start_response", "data": res})
+                elif action == "stop":
+                    res = capture_svc.stop_capture()
+                    await websocket.send_json({"type": "stop_response", "data": res})
+                elif action == "status":
+                    status_data = capture_svc.get_status()
+                    await websocket.send_json({"type": "status", "data": status_data})
+                elif action == "ping":
+                    await websocket.send_json({"type": "pong", "time": time.time()})
+            except json.JSONDecodeError:
+                await websocket.send_json({"type": "error", "message": "Invalid JSON payload."})
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    finally:
+        sender.cancel()
+        try:
+            await sender
+        except (asyncio.CancelledError, Exception):
+            pass
+        capture_svc.unregister_async_queue(queue)
 
 
 
