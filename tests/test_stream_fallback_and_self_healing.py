@@ -181,6 +181,7 @@ def test_app_js_circuit_breaker_and_fallback_syntax_in_node():
     global.location = {{ protocol: 'http:', host: '127.0.0.1:8000' }};
     global.localStorage = {{ getItem: () => null, setItem: () => null }};
     global.navigator = {{ mediaDevices: {{}} }};
+    global.fetch = () => Promise.resolve({{ ok: true, json: () => Promise.resolve({{ success: true, windows: [] }}) }});
 
     // Execute app.js
     eval(appCode);
@@ -256,3 +257,233 @@ def test_api_stream_accepts_target_parameter(test_client: TestClient):
         assert "multipart/x-mixed-replace; boundary=frame" in resp.headers["content-type"]
         chunk = next(resp.iter_bytes())
         assert len(chunk) > 0
+
+
+def test_api_stream_handles_string_and_negative_hwnd_and_desktop_switch(test_client: TestClient):
+    """Verify /api/stream correctly handles string titles, negative HWNDs, and desktop switching."""
+    from src.capture import get_capture_service
+    from src.config import get_config
+
+    cfg = get_config()
+    svc = get_capture_service(mock_mode=cfg.mock_inference)
+
+    # 1. Negative HWND string target
+    with test_client.stream("GET", "/api/stream?target=-1024&fps=10") as resp:
+        assert resp.status_code == 200
+        assert svc._target_hwnd == -1024
+
+    # 2. String window title target (mock mode finds window or handles gracefully)
+    with test_client.stream("GET", "/api/stream?target=DesktopWindow&fps=10") as resp:
+        assert resp.status_code == 200
+
+    # 3. Switching back to desktop (target=0) from active non-zero target
+    svc._target_hwnd = 9999
+    svc._is_running = True
+    with test_client.stream("GET", "/api/stream?target=0&fps=10") as resp:
+        assert resp.status_code == 200
+        assert svc._target_hwnd == 0
+
+
+# =====================================================================
+# 4. Deep Deduplication, Preflight Invariants, & Lifecycle Tests
+# =====================================================================
+
+def test_node_websocket_error_and_close_deduplication():
+    """Verify that browser WebSocket onerror followed by onclose does NOT double-increment failure count."""
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    node_dedup_script = f"""
+    const fs = require('fs');
+    const appCode = fs.readFileSync({repr(str(APP_JS))}, 'utf8');
+
+    let activeSocket = null;
+    class MockWebSocket {{
+        constructor(url) {{
+            this.url = url;
+            this.binaryType = 'blob';
+            this.onopen = null;
+            this.onmessage = null;
+            this.onerror = null;
+            this.onclose = null;
+            activeSocket = this;
+        }}
+        send() {{}}
+        close() {{
+            if (this.onclose) this.onclose();
+        }}
+    }}
+
+    global.window = {{
+        ReviewManager: class {{
+            constructor() {{ this.records = []; }}
+            saveCurrentSessionToServer() {{}}
+            updateSessionBadge() {{}}
+        }},
+        CoordinateAdapter: {{ calculateLetterbox: () => ({{ padX: 0, padY: 0, scaledW: 640, scaledH: 480 }}) }},
+        addEventListener: () => {{}},
+        removeEventListener: () => {{}},
+        WebSocket: MockWebSocket
+    }};
+    global.WebSocket = MockWebSocket;
+    global.document = {{
+        documentElement: {{ classList: {{ contains: () => false, add: () => {{}}, remove: () => {{}}, toggle: () => {{}} }} }},
+        body: {{ appendChild: () => {{}} }},
+        getElementById: (id) => ({{
+            style: {{}},
+            classList: {{ add: () => {{}}, remove: () => {{}} }},
+            querySelector: () => ({{ innerText: '' }}),
+            getContext: () => ({{ fillRect: () => {{}}, drawImage: () => {{}}, clearRect: () => {{}} }}),
+            appendChild: () => {{}},
+            width: 640, height: 480
+        }}),
+        createElement: () => ({{ width: 640, height: 640, getContext: () => ({{ fillRect: () => {{}}, drawImage: () => {{}}, clearRect: () => {{}} }}) }})
+    }};
+    global.location = {{ protocol: 'http:', host: '127.0.0.1:8000' }};
+    global.localStorage = {{ getItem: () => null, setItem: () => null }};
+    global.navigator = {{ mediaDevices: {{}} }};
+    global.fetch = () => Promise.resolve({{ ok: true, json: () => Promise.resolve({{ success: true, windows: [] }}) }});
+
+    eval(appCode);
+
+    const cb = window.wsCircuitBreaker;
+    const state = window.AppState;
+    cb.reset();
+    state.wsRetryCount = 0;
+
+    // Trigger connectNativeWgc
+    window.connectNativeWgc(0);
+    if (!activeSocket) throw new Error("MockWebSocket was not instantiated");
+
+    // Simulate browser behavior on HTTP 404 handshake failure:
+    // Browser fires 'error' event first, followed immediately by 'close' event
+    if (activeSocket.onerror) activeSocket.onerror(new Error("Handshake failed"));
+    if (activeSocket.onclose) activeSocket.onclose();
+
+    // Invariant: Both events must count as exactly ONE failure attempt, not two!
+    if (cb.failures !== 1) {{
+        throw new Error("Expected exactly 1 failure after onerror + onclose sequence, got " + cb.failures);
+    }}
+    if (state.wsRetryCount !== 1) {{
+        throw new Error("Expected wsRetryCount to be 1, got " + state.wsRetryCount);
+    }}
+    if (cb.isOpen()) {{
+        throw new Error("Circuit breaker should not be open after a single failed attempt");
+    }}
+
+    clearTimeout(state.wsRetryTimer);
+    console.log("DEDUPLICATION_NODE_OK");
+    """
+
+    res = subprocess.run(
+        [node_bin, "-e", node_dedup_script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert res.returncode == 0, f"Node.js deduplication test failed: {res.stderr}"
+    assert "DEDUPLICATION_NODE_OK" in res.stdout
+
+
+def test_launcher_imports_after_environment_check():
+    """Verify scripts/launcher.py calls check_python_environment() before importing uvicorn or get_config."""
+    import ast
+    launcher_src = (REPO_ROOT / "scripts" / "launcher.py").read_text(encoding="utf-8")
+    tree = ast.parse(launcher_src)
+
+    for item in tree.body:
+        if isinstance(item, ast.FunctionDef) and item.name in ("cmd_run", "cmd_start"):
+            check_found = False
+            for stmt in item.body:
+                # Look for call to check_python_environment
+                for node in ast.walk(stmt):
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "check_python_environment":
+                        check_found = True
+                        break
+                if check_found:
+                    break
+                # If we encounter an import statement before check_python_environment, it's a violation!
+                if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                    for alias in getattr(stmt, "names", []):
+                        assert alias.name not in ("uvicorn", "get_config"), (
+                            f"{item.name} imports '{alias.name}' before executing check_python_environment()!"
+                        )
+
+
+def test_stop_ops_clears_socket_handlers_and_restores_button_text():
+    """Verify stopOps detaches event handlers and restores exact button label per capture mode."""
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    node_stop_script = f"""
+    const fs = require('fs');
+    const appCode = fs.readFileSync({repr(str(APP_JS))}, 'utf8');
+
+    let btnSpanText = '';
+    global.window = {{
+        ReviewManager: class {{
+            constructor() {{ this.records = []; }}
+            saveCurrentSessionToServer() {{}}
+            updateSessionBadge() {{}}
+        }},
+        CoordinateAdapter: {{ calculateLetterbox: () => ({{ padX: 0, padY: 0, scaledW: 640, scaledH: 480 }}) }},
+        addEventListener: () => {{}},
+        removeEventListener: () => {{}}
+    }};
+    global.document = {{
+        documentElement: {{ classList: {{ contains: () => false, add: () => {{}}, remove: () => {{}}, toggle: () => {{}} }} }},
+        body: {{ appendChild: () => {{}} }},
+        getElementById: (id) => ({{
+            style: {{}},
+            classList: {{ add: () => {{}}, remove: () => {{}} }},
+            querySelector: (sel) => ({{
+                get innerText() {{ return btnSpanText; }},
+                set innerText(v) {{ btnSpanText = v; }}
+            }}),
+            getContext: () => ({{ fillRect: () => {{}}, drawImage: () => {{}}, clearRect: () => {{}} }}),
+            width: 640, height: 480
+        }}),
+        createElement: () => ({{ width: 640, height: 640, getContext: () => ({{ fillRect: () => {{}}, drawImage: () => {{}}, clearRect: () => {{}} }}) }})
+    }};
+    global.location = {{ protocol: 'http:', host: '127.0.0.1:8000' }};
+    global.localStorage = {{ getItem: () => null, setItem: () => null }};
+    global.navigator = {{ mediaDevices: {{}} }};
+    global.fetch = () => Promise.resolve({{ ok: true, json: () => Promise.resolve({{ success: true, windows: [] }}) }});
+
+    eval(appCode);
+
+    const state = window.AppState;
+    state.captureMode = 'wgc';
+    const mockWs = {{
+        onopen: () => {{}},
+        onmessage: () => {{}},
+        onerror: () => {{}},
+        onclose: () => {{}},
+        send: () => {{}},
+        close: () => {{}}
+    }};
+    state.wgcWs = mockWs;
+
+    window.stopOps();
+
+    if (mockWs.onopen !== null || mockWs.onerror !== null || mockWs.onclose !== null) {{
+        throw new Error("stopOps did not detach WebSocket event handlers");
+    }}
+    if (!btnSpanText.includes("네이티브")) {{
+        throw new Error("Expected button text to include '네이티브', got: " + btnSpanText);
+    }}
+
+    console.log("STOP_OPS_NODE_OK");
+    """
+
+    res = subprocess.run(
+        [node_bin, "-e", node_stop_script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert res.returncode == 0, f"Node.js stopOps test failed: {res.stderr}"
+    assert "STOP_OPS_NODE_OK" in res.stdout
+

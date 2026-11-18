@@ -249,7 +249,7 @@
   3. `실행하기.bat` 사전 실행 점검에서 `import websockets` 누락 시 자동 설치 및 서버 정상 기동 입증.
   4. 프런트엔드 WebSocket 실패 시 서버 무한 폭격 차단: 지수 백오프 및 3회 초과 시 서킷 브레이커 OPEN 전이 입증.
   5. WebSocket 미지원/404 시 HTTP 스트림 프로토콜(`/api/capture/frame` / `/api/stream`)으로 자동 전환되어 화면 캡처 및 YOLO 탐지 중단 없이 연속 작동 보장.
-  6. 신규 8종 단위/통합 테스트 포함 전체 172개 테스트 100% PASS 및 무회귀 입증.
+  6. 신규 12종 단위/통합 테스트(중복 실패 방지, 런처 의존성 역전 차단, 음수/문자열 HWND 스트림 라우팅 포함) 포함 전체 176개 테스트 100% PASS 및 무회귀 입증.
   7. WBS 게이트 유효성 검사기(`python scripts/wbs_gate_validator.py`) 100% 통과.
 * **감사 판정**: `[PASS]`
 * **롤백 전략**: `git checkout HEAD -- requirements.txt scripts/launcher.py 실행하기.bat src/server.py static/app.js WBS.md; rm tests/test_stream_fallback_and_self_healing.py`

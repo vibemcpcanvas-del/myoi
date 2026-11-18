@@ -37,6 +37,7 @@
         // Native WGC Capture Sidecar State
         captureMode: 'wgc', // 'wgc' (default / recommended) or 'webrtc'
         wgcWs: null,
+        wgcSessionGen: 0,
         httpFallbackActive: false,
         fallbackTimer: null,
         wsRetryTimer: null,
@@ -514,6 +515,7 @@
                     quality: 85
                 })
             });
+            if (!state.httpFallbackActive) return; // user cancelled/stopped while starting
             const data = await res.json();
             if (!data.success) {
                 toast(`네이티브 캡처 시작 실패: ${data.error || '대상 창을 찾을 수 없습니다.'}`, true);
@@ -522,7 +524,10 @@
             }
 
             $('overlayStandby').style.display = 'none';
-            $('btnShare').querySelector('span').innerText = "연결 해제";
+            const btnShare = $('btnShare');
+            if (btnShare && btnShare.querySelector('span')) {
+                btnShare.querySelector('span').innerText = "연결 해제";
+            }
             $('btnStart').classList.remove('hidden');
             $('vid').classList.add('hidden');
             $('wgcCanvas').classList.remove('hidden');
@@ -533,6 +538,7 @@
             toast("HTTP 대체 프로토콜로 네이티브 캡처가 연결되었습니다.");
 
             let pollingInFlight = false;
+            let consecutiveHttpErrors = 0;
             const pollFrame = async () => {
                 if (!state.httpFallbackActive) return;
                 if (pollingInFlight) {
@@ -542,7 +548,9 @@
                 pollingInFlight = true;
                 try {
                     const frameRes = await fetch(`/api/capture/frame?t=${Date.now()}`);
+                    if (!state.httpFallbackActive) return;
                     if (frameRes.ok) {
+                        consecutiveHttpErrors = 0;
                         const blob = await frameRes.blob();
                         const bmp = await createImageBitmap(blob);
                         const cvs = state.wgcCanvas || $('wgcCanvas');
@@ -561,13 +569,17 @@
                         state.lastFrameArrival = Date.now();
                     } else if (frameRes.status === 503) {
                         state.wgcStalled = true;
+                    } else {
+                        consecutiveHttpErrors++;
                     }
                 } catch (e) {
+                    consecutiveHttpErrors++;
                     console.warn("HTTP capture frame polling warning:", e);
                 } finally {
                     pollingInFlight = false;
                     if (state.httpFallbackActive) {
-                        state.fallbackTimer = setTimeout(pollFrame, 40); // ~25 FPS
+                        const delay = consecutiveHttpErrors > 5 ? 1000 : 40; // ~25 FPS with backoff on repeated errors
+                        state.fallbackTimer = setTimeout(pollFrame, delay);
                     }
                 }
             };
@@ -582,7 +594,13 @@
 
     const handleWsFailure = (targetHwnd) => {
         if (state.wgcWs) {
-            try { state.wgcWs.close(); } catch (e) {}
+            try {
+                state.wgcWs.onopen = null;
+                state.wgcWs.onmessage = null;
+                state.wgcWs.onerror = null;
+                state.wgcWs.onclose = null;
+                state.wgcWs.close();
+            } catch (e) {}
             state.wgcWs = null;
         }
         wsCircuitBreaker.recordFailure();
@@ -619,8 +637,23 @@
         const wsUrl = `${protocol}//${location.host}/ws/stream`;
         $('statusTxt').innerHTML = `<span class="text-blue-500">🔵 네이티브 WGC 사이드카 연결 중... (${state.wsRetryCount + 1}/3)</span>`;
 
+        state.wgcSessionGen = (state.wgcSessionGen || 0) + 1;
+        const currentSessionId = state.wgcSessionGen;
         let connectionEstablished = false;
+        let failureHandled = false;
         let wsHandshakeTimer = null;
+
+        const onConnectionFailed = (reason) => {
+            if (failureHandled || connectionEstablished) return;
+            if (state.wgcSessionGen !== currentSessionId) return;
+            failureHandled = true;
+            if (wsHandshakeTimer) {
+                clearTimeout(wsHandshakeTimer);
+                wsHandshakeTimer = null;
+            }
+            console.warn(`[WGC] WebSocket 연결 실패 (${reason}). 서킷 브레이커 카운트 증가.`);
+            handleWsFailure(targetHwnd);
+        };
 
         try {
             const ws = new WebSocket(wsUrl);
@@ -628,13 +661,22 @@
 
             wsHandshakeTimer = setTimeout(() => {
                 if (!connectionEstablished) {
-                    console.warn("[WGC] WebSocket 핸드셰이크 타임아웃.");
-                    try { ws.close(); } catch (e) {}
-                    handleWsFailure(targetHwnd);
+                    try {
+                        ws.onopen = null;
+                        ws.onmessage = null;
+                        ws.onerror = null;
+                        ws.onclose = null;
+                        ws.close();
+                    } catch (e) {}
+                    onConnectionFailed("핸드셰이크 타임아웃");
                 }
             }, 3000);
 
             ws.onopen = () => {
+                if (state.wgcSessionGen !== currentSessionId) {
+                    try { ws.close(); } catch (e) {}
+                    return;
+                }
                 connectionEstablished = true;
                 if (wsHandshakeTimer) clearTimeout(wsHandshakeTimer);
                 wsCircuitBreaker.recordSuccess();
@@ -647,7 +689,10 @@
                     quality: 85
                 }));
                 $('overlayStandby').style.display = 'none';
-                $('btnShare').querySelector('span').innerText = "연결 해제";
+                const btnShare = $('btnShare');
+                if (btnShare && btnShare.querySelector('span')) {
+                    btnShare.querySelector('span').innerText = "연결 해제";
+                }
                 $('btnStart').classList.remove('hidden');
                 $('vid').classList.add('hidden');
                 $('wgcCanvas').classList.remove('hidden');
@@ -657,6 +702,7 @@
             };
 
             ws.onmessage = async (e) => {
+                if (state.wgcSessionGen !== currentSessionId) return;
                 if (typeof e.data === 'string') {
                     try {
                         const msg = JSON.parse(e.data);
@@ -715,10 +761,8 @@
             };
 
             ws.onerror = (err) => {
-                if (wsHandshakeTimer) clearTimeout(wsHandshakeTimer);
                 if (!connectionEstablished) {
-                    console.warn("[WGC] WebSocket 연결 오류 (핸드셰이크 실패). 서킷 브레이커 카운트 증가.");
-                    handleWsFailure(targetHwnd);
+                    onConnectionFailed("핸드셰이크 오류");
                 } else {
                     console.error("WGC WebSocket error:", err);
                     toast("WGC 사이드카 통신 오류", true);
@@ -726,9 +770,8 @@
             };
 
             ws.onclose = () => {
-                if (wsHandshakeTimer) clearTimeout(wsHandshakeTimer);
                 if (!connectionEstablished) {
-                    handleWsFailure(targetHwnd);
+                    onConnectionFailed("연결 거절/종료");
                     return;
                 }
                 if (state.wgcWs === ws) {
@@ -743,9 +786,7 @@
 
             state.wgcWs = ws;
         } catch (err) {
-            if (wsHandshakeTimer) clearTimeout(wsHandshakeTimer);
-            console.error("WGC WebSocket creation failed:", err);
-            handleWsFailure(targetHwnd);
+            onConnectionFailed("WebSocket 인스턴스 생성 예외");
         }
     };
     window.connectNativeWgc = connectNativeWgc;
@@ -791,6 +832,7 @@
     };
 
     const stopOps = () => {
+        state.wgcSessionGen = (state.wgcSessionGen || 0) + 1;
         state.isRunning = false;
         state.isInferenceInFlight = false;
         clearTimeout(state.timer);
@@ -810,6 +852,10 @@
 
         if (state.wgcWs) {
             try {
+                state.wgcWs.onopen = null;
+                state.wgcWs.onmessage = null;
+                state.wgcWs.onerror = null;
+                state.wgcWs.onclose = null;
                 state.wgcWs.send(JSON.stringify({ action: "stop" }));
                 state.wgcWs.close();
             } catch (e) {}
@@ -832,9 +878,14 @@
             window.Reviewer.saveCurrentSessionToServer(true);
         }
 
-        $('vid').srcObject = null;
-        $('overlayStandby').style.display = 'flex';
-        $('btnShare').querySelector('span').innerText = state.captureMode === 'wgc' ? "⚡ 네이티브 연결" : "화면 공유";
+        const vid = $('vid');
+        if (vid) vid.srcObject = null;
+        const overlayStandby = $('overlayStandby');
+        if (overlayStandby) overlayStandby.style.display = 'flex';
+        const btnShare = $('btnShare');
+        if (btnShare && btnShare.querySelector('span')) {
+            btnShare.querySelector('span').innerText = state.captureMode === 'wgc' ? "🖥️ 네이티브 연결" : "🌐 화면 공유";
+        }
         $('btnStart').classList.add('hidden');
         $('btnStop').classList.add('hidden');
         $('statusTxt').innerText = "연결이 해제되었습니다.";
@@ -843,8 +894,9 @@
         $('alertBanner').style.opacity = '0';
 
         const cvs = $('cvs');
-        cvs.getContext('2d').clearRect(0, 0, cvs.width, cvs.height);
+        if (cvs) cvs.getContext('2d').clearRect(0, 0, cvs.width, cvs.height);
     };
+    window.stopOps = stopOps;
 
     $('btnStart').onclick = () => {
         const source = getFrameSource();
@@ -872,8 +924,9 @@
         $('videoWrap').classList.remove('alert');
         $('alertBanner').style.opacity = '0';
         const cvs = $('cvs');
-        cvs.getContext('2d').clearRect(0, 0, cvs.width, cvs.height);
+        if (cvs) cvs.getContext('2d').clearRect(0, 0, cvs.width, cvs.height);
     };
+    window.stopOps = stopOps;
 
     // --- Inference & Drawing Loop ---
     const loop = async () => {

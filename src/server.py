@@ -726,15 +726,25 @@ async def _mjpeg_stream_generator(capture_svc: CaptureService):
 
 
 @app.get("/api/stream")
-async def get_mjpeg_stream(target: Optional[str] = "0", fps: Optional[int] = 20):
+async def get_mjpeg_stream(target: Optional[str] = None, fps: Optional[int] = 20):
     """Live MJPEG video stream route (multipart/x-mixed-replace)."""
     cfg = get_config()
     capture_svc = get_capture_service(mock_mode=cfg.mock_inference)
-    target_val = int(target) if target and target.isdigit() else 0
+
+    parsed_target: int | str = 0
+    if target is not None:
+        target_str = str(target).strip()
+        if target_str.lstrip("-").isdigit():
+            parsed_target = int(target_str)
+        else:
+            parsed_target = target_str
+
     if not capture_svc.is_running:
-        capture_svc.start_capture(target=target_val, fps=fps or 20)
-    elif target_val != capture_svc._target_hwnd and target_val != 0:
-        capture_svc.start_capture(target=target_val, fps=fps or 20)
+        capture_svc.start_capture(target=parsed_target, fps=fps or 20)
+    elif target is not None:
+        current_target = capture_svc._target_hwnd
+        if parsed_target != current_target:
+            capture_svc.start_capture(target=parsed_target, fps=fps or 20)
 
     return StreamingResponse(
         _mjpeg_stream_generator(capture_svc),

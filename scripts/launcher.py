@@ -363,6 +363,16 @@ def create_desktop_shortcut() -> tuple[bool, str]:
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Run SCHALE server in foreground console with automatic browser launch."""
+    print("========================================================================")
+    print("  SCHALE 전투 추적 시스템 (myoi) 실행 중...")
+    print("========================================================================")
+
+    # 1. Environment check and self-healing FIRST before importing application dependencies
+    ok, msg = check_python_environment()
+    if not ok:
+        print(f"[환경 오류] {msg}")
+        return EXIT_ENV_ERROR
+
     from src.config import get_config
     import uvicorn
 
@@ -371,16 +381,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     port = args.port or config.port
     connect_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
     server_url = f"http://{connect_host}:{port}"
-
-    print("========================================================================")
-    print("  SCHALE 전투 추적 시스템 (myoi) 실행 중...")
-    print("========================================================================")
-
-    # 1. Environment check
-    ok, msg = check_python_environment()
-    if not ok:
-        print(f"[환경 오류] {msg}")
-        return EXIT_ENV_ERROR
 
     # 2. Check if already running
     active_pid = get_active_server_pid(port=port)
@@ -435,6 +435,16 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_start(args: argparse.Namespace) -> int:
     """Start SCHALE server in detached background mode with strict health confirmation."""
+    print("========================================================================")
+    print("  [SCHALE TACTICAL TRACKING] 서버 시작 준비 중...")
+    print("========================================================================")
+
+    # 1. Environment check and self-healing FIRST before importing application dependencies
+    ok, msg = check_python_environment()
+    if not ok:
+        print(f"[환경 오류] {msg}")
+        return EXIT_ENV_ERROR
+
     from src.config import get_config
     config = get_config()
 
@@ -442,16 +452,6 @@ def cmd_start(args: argparse.Namespace) -> int:
     port = args.port or config.port
     connect_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
     server_url = f"http://{connect_host}:{port}"
-
-    print("========================================================================")
-    print("  [SCHALE TACTICAL TRACKING] 서버 시작 준비 중...")
-    print("========================================================================")
-
-    # 1. Environment check
-    ok, msg = check_python_environment()
-    if not ok:
-        print(f"[환경 오류] {msg}")
-        return EXIT_ENV_ERROR
 
     # 2. Check if already running
     active_pid = get_active_server_pid(port=port)
