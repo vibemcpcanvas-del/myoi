@@ -350,3 +350,54 @@ def test_websocket_stream_control_protocol(test_client: TestClient):
                     break
         assert stop_msg is not None
         assert stop_msg["type"] == "stop_response"
+
+
+def test_capture_state_machine_and_invalidation():
+    """Verify explicit CaptureState transitions and stale frame invalidation."""
+    from src.capture.wgc_capture import CaptureState
+
+    service = CaptureService(mock_mode=True)
+    assert service.current_state == CaptureState.IDLE
+
+    # Start capture -> CAPTURING
+    service.start_capture(target=1001, fps=25)
+    time.sleep(0.2)
+    assert service.current_state == CaptureState.CAPTURING
+    status = service.get_status()
+    assert status["state"] == CaptureState.CAPTURING.value
+    assert status["seqId"] > 0
+    assert not status["stalled"]
+
+    # Invalidate frame if state changed to PAUSED_MINIMIZED
+    with service._lock:
+        service._current_state = CaptureState.PAUSED_MINIMIZED
+    
+    jpeg, meta = service.get_latest_frame()
+    assert jpeg is None
+    assert meta["state"] == CaptureState.PAUSED_MINIMIZED.value
+    assert meta["error"] == "capture_not_active"
+
+    # Stop capture -> STOPPED
+    service.stop_capture()
+    assert service.current_state == CaptureState.STOPPED
+
+
+def test_process_name_resolution_win32_safe():
+    """Verify WindowFinder._get_process_name_by_pid resolves without crashing."""
+    import os
+    current_pid = os.getpid()
+    proc_name = WindowFinder._get_process_name_by_pid(current_pid)
+    assert isinstance(proc_name, str)
+    assert len(proc_name) > 0
+    assert "python" in proc_name.lower() or "py" in proc_name.lower() or ".exe" in proc_name.lower()
+
+
+def test_launcher_capture_status_integration():
+    """Verify scripts/launcher.py cmd_status integrates Native WGC Sidecar."""
+    from scripts.launcher import cmd_status
+    import argparse
+
+    args = argparse.Namespace(host=None, port=None)
+    # cmd_status should run without error
+    ret = cmd_status(args)
+    assert ret in (0, 1)

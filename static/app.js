@@ -8,7 +8,7 @@
 (function () {
     'use strict';
 
-    const $ = id => document.getElementById(id);
+    const $ = id => document.getElementById(id) || (id === 'chkHideStream' ? document.getElementById('chkHideVid') : null) || (id === 'chkHideVid' ? document.getElementById('chkHideStream') : null);
     const toast = (msg, err) => {
         const d = document.createElement('div');
         d.className = `toast ${err ? 'border-red-500 text-red-600' : 'text-gray-800'}`;
@@ -38,6 +38,8 @@
         captureMode: 'wgc', // 'wgc' (default / recommended) or 'webrtc'
         wgcWs: null,
         wgcReady: false,
+        wgcStalled: false,
+        lastFrameArrival: 0,
         wgcCanvas: $('wgcCanvas'),
         wgcCtx: $('wgcCanvas') ? $('wgcCanvas').getContext('2d') : null,
         wgcHwnd: 0,
@@ -251,7 +253,8 @@
     const updateConcealState = (conceal) => {
         const overlay = $('streamConcealOverlay');
         if (overlay) {
-            overlay.style.display = conceal ? 'flex' : 'none';
+            const isActive = state.stream || state.wgcWs || state.isRunning;
+            overlay.style.display = (conceal && isActive) ? 'flex' : 'none';
         }
         // Ensure underlying video & WGC canvas maintain full hardware decoding composition
         if ($('vid')) $('vid').style.opacity = '1';
@@ -484,11 +487,48 @@
                         $('btnStart').classList.remove('hidden');
                         $('vid').classList.add('hidden');
                         $('wgcCanvas').classList.remove('hidden');
-                        toast("네이티브 WGC 캡처 연결 성공");
+                        if (chkHide && chkHide.checked) {
+                            updateConcealState(true);
+                        }
                     };
 
                     ws.onmessage = async (e) => {
-                        if (typeof e.data === 'string') return;
+                        if (typeof e.data === 'string') {
+                            try {
+                                const msg = JSON.parse(e.data);
+                                if (msg.type === 'capture_state') {
+                                    if (msg.state === 'PAUSED_MINIMIZED') {
+                                        $('statusTxt').innerHTML = '<span class="text-amber-500 font-bold">⏸️ 대상 창이 최소화되었습니다 (캡처 대기 중)</span>';
+                                        state.wgcStalled = true;
+                                    } else if (msg.state === 'DEGRADED') {
+                                        $('statusTxt').innerHTML = `<span class="text-amber-500 font-bold">⚠️ 캡처 성능 저하 (${msg.error || '지연'})</span>`;
+                                        state.wgcStalled = true;
+                                    } else if (msg.state === 'FAILED') {
+                                        $('statusTxt').innerHTML = `<span class="text-rose-500 font-bold">🚨 캡처 실패: ${msg.error || '창 소실'}</span>`;
+                                        state.wgcStalled = true;
+                                    } else if (msg.state === 'CAPTURING') {
+                                        if (state.wgcStalled) {
+                                            state.wgcStalled = false;
+                                            if (state.isRunning) {
+                                                $('statusTxt').innerText = "실시간 감지 및 추적 중...";
+                                            }
+                                        }
+                                    }
+                                } else if (msg.type === 'start_response') {
+                                    if (!msg.data || !msg.data.success) {
+                                        toast(`네이티브 캡처 실패: ${msg.data?.error || msg.data?.message || '대상 창을 찾을 수 없습니다.'}`, true);
+                                        stopOps();
+                                    } else {
+                                        toast("네이티브 WGC 캡처 연결 성공");
+                                    }
+                                }
+                            } catch (err) {
+                                console.warn("WGC WS text parse error:", err);
+                            }
+                            return;
+                        }
+
+                        // Binary Frame Processing
                         try {
                             const bmp = await createImageBitmap(e.data);
                             const cvs = state.wgcCanvas || $('wgcCanvas');
@@ -503,6 +543,8 @@
                             }
                             bmp.close();
                             state.wgcReady = true;
+                            state.wgcStalled = false;
+                            state.lastFrameArrival = Date.now();
                         } catch (err) {
                             console.warn("WGC frame decode warning:", err);
                         }
@@ -517,6 +559,9 @@
                         if (state.wgcWs === ws) {
                             state.wgcWs = null;
                             state.wgcReady = false;
+        state.wgcStalled = false;
+        const concealOverlay = $('streamConcealOverlay');
+        if (concealOverlay) concealOverlay.style.display = 'none';
                             stopOps();
                         }
                     };
@@ -578,6 +623,9 @@
             state.wgcWs = null;
         }
         state.wgcReady = false;
+        state.wgcStalled = false;
+        const concealOverlay = $('streamConcealOverlay');
+        if (concealOverlay) concealOverlay.style.display = 'none';
 
         if (window.Reviewer && window.Reviewer.records.length > 0) {
             window.Reviewer.saveCurrentSessionToServer(true);
@@ -630,6 +678,22 @@
     const loop = async () => {
         if (!state.isRunning) return;
         if (state.isInferenceInFlight) return;
+
+        if (state.wgcStalled) {
+            if (state.isRunning) {
+                state.timer = setTimeout(loop, 300);
+            }
+            return;
+        }
+
+        // Stale watchdog: verify fresh frames arrived within 1.5 seconds in native WGC mode
+        if (state.captureMode === 'wgc' && state.lastFrameArrival && (Date.now() - state.lastFrameArrival > 1500)) {
+            $('statusTxt').innerHTML = '<span class="text-amber-500 font-bold">⚠️ 프레임 지연 감지 (대기 중...)</span>';
+            if (state.isRunning) {
+                state.timer = setTimeout(loop, 300);
+            }
+            return;
+        }
 
         const source = getFrameSource();
         if (!source || !source.width || !source.height) {

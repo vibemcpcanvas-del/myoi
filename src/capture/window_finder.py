@@ -175,9 +175,29 @@ class WindowFinder:
 
     @staticmethod
     def _get_process_name_by_pid(pid: int) -> str:
-        """Retrieves process name safely via psutil or standard read-only handle."""
+        """Retrieves process name safely using Win32 API without external dependencies, with psutil fallback."""
         if pid <= 0:
             return "unknown.exe"
+
+        # 1. Primary Win32 method: QueryFullProcessImageNameW (100% zero-dependency on Windows)
+        if sys.platform == "win32":
+            try:
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                kernel32 = ctypes.windll.kernel32
+                h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                if h_proc:
+                    try:
+                        buf = ctypes.create_unicode_buffer(1024)
+                        size = wintypes.DWORD(1024)
+                        if kernel32.QueryFullProcessImageNameW(h_proc, 0, buf, ctypes.byref(size)):
+                            exe_path = buf.value
+                            return os.path.basename(exe_path)
+                    finally:
+                        kernel32.CloseHandle(h_proc)
+            except Exception:
+                pass
+
+        # 2. Secondary fallback via psutil
         try:
             import psutil
             proc = psutil.Process(pid)

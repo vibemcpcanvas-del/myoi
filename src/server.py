@@ -38,7 +38,7 @@ from src.aspects.telemetry import (
     default_telemetry_collector,
     measure_telemetry,
 )
-from src.capture import CaptureService, get_capture_service, WindowFinder
+from src.capture import CaptureService, get_capture_service, WindowFinder, CaptureState
 from src.config import AppConfig, get_config
 from src.multipart_parser import parse_multipart_body
 from src.session_manager import SessionManager, get_session_manager
@@ -673,7 +673,13 @@ async def get_capture_frame_endpoint():
     jpeg_bytes, meta = capture_svc.get_latest_frame()
 
     if not jpeg_bytes:
-        img, meta = capture_svc.engine.capture_frame(0)
+        if capture_svc.current_state in (CaptureState.PAUSED_MINIMIZED, CaptureState.FAILED):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"error": "capture_degraded_or_paused", "meta": meta},
+            )
+        target = capture_svc._target_hwnd if capture_svc.is_running else 0
+        img, meta = capture_svc.engine.capture_frame(target)
         if img:
             jpeg_bytes = capture_svc.engine.encode_jpeg(img)
         else:
@@ -692,8 +698,15 @@ async def _mjpeg_stream_generator(capture_svc: CaptureService):
     try:
         while True:
             try:
-                frame_bytes, _ = await asyncio.wait_for(queue.get(), timeout=0.5)
+                item = await asyncio.wait_for(queue.get(), timeout=0.5)
+                if isinstance(item, tuple):
+                    frame_bytes, _ = item
+                else:
+                    continue
             except asyncio.TimeoutError:
+                if not capture_svc.is_running or capture_svc.current_state != CaptureState.CAPTURING:
+                    await asyncio.sleep(0.08)
+                    continue
                 frame_bytes, _ = capture_svc.get_latest_frame()
                 if not frame_bytes:
                     await asyncio.sleep(0.05)
@@ -729,7 +742,7 @@ async def get_mjpeg_stream():
 @app.websocket("/ws/stream")
 @app.websocket("/api/stream/ws")
 async def websocket_stream_endpoint(websocket: WebSocket):
-    """High-throughput, low-latency WebSocket stream for native frames."""
+    """High-throughput, low-latency WebSocket stream for native frames and control state."""
     await websocket.accept()
     cfg = get_config()
     capture_svc = get_capture_service(mock_mode=cfg.mock_inference)
@@ -740,9 +753,13 @@ async def websocket_stream_endpoint(websocket: WebSocket):
         try:
             while True:
                 try:
-                    frame_bytes, meta = await asyncio.wait_for(queue.get(), timeout=0.2)
-                    if frame_bytes:
-                        await websocket.send_bytes(frame_bytes)
+                    item = await asyncio.wait_for(queue.get(), timeout=0.2)
+                    if isinstance(item, tuple):
+                        frame_bytes, meta = item
+                        if frame_bytes:
+                            await websocket.send_bytes(frame_bytes)
+                    elif isinstance(item, dict):
+                        await websocket.send_json(item)
                 except asyncio.TimeoutError:
                     if websocket.client_state.name != "CONNECTED":
                         break

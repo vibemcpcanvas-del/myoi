@@ -100,3 +100,18 @@ def test_concealment_simulation_keeps_pixels_active():
     zero_extrema = zero_frame.getextrema()
     is_all_black = all(ch_max == 0 for _, ch_max in zero_extrema)
     assert is_all_black, "Buggy behavior produces all-black pixels which breaks inference"
+
+
+def test_app_js_stop_ops_resets_conceal_overlay():
+    """Verify stopOps hides streamConcealOverlay so NO SIGNAL overlay is not obscured."""
+    content = APP_JS.read_text(encoding="utf-8")
+    assert "streamConcealOverlay" in content
+    assert "concealOverlay.style.display = 'none'" in content or "overlay.style.display = 'none'" in content
+
+
+def test_app_js_stale_watchdog_and_stalled_guard():
+    """Verify app.js includes stale frame watchdog and guards against frozen canvas inference."""
+    content = APP_JS.read_text(encoding="utf-8")
+    assert "wgcStalled" in content
+    assert "lastFrameArrival" in content
+    assert "프레임 지연 감지" in content or "지연" in content

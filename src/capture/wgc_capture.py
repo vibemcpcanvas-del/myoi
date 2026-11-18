@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+from enum import Enum
 import io
 import os
 import sys
@@ -15,6 +16,15 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 from PIL import Image, ImageDraw
+
+
+class CaptureState(str, Enum):
+    IDLE = "IDLE"
+    CAPTURING = "CAPTURING"
+    DEGRADED = "DEGRADED"
+    PAUSED_MINIMIZED = "PAUSED_MINIMIZED"
+    FAILED = "FAILED"
+    STOPPED = "STOPPED"
 
 
 # Windows API Constants
@@ -177,7 +187,9 @@ class NativeCaptureEngine:
             "backend": "gdi_desktop_bitblt",
             "elapsed_ms": round(elapsed_ms, 2),
             "frame_id": self._frame_counter,
+            "qpc_timestamp": time.perf_counter(),
             "timestamp": time.time(),
+            "state": CaptureState.CAPTURING.value if img else CaptureState.FAILED.value,
         }
         return img, meta
 
@@ -191,6 +203,7 @@ class NativeCaptureEngine:
                 "status": "window_not_found",
                 "error": f"Window HWND {hwnd} does not exist.",
                 "hwnd": hwnd,
+                "state": CaptureState.FAILED.value,
             }
 
         if user32.IsIconic(wintypes.HWND(hwnd)):
@@ -198,6 +211,7 @@ class NativeCaptureEngine:
                 "status": "window_minimized",
                 "error": f"Target window HWND {hwnd} is minimized.",
                 "hwnd": hwnd,
+                "state": CaptureState.PAUSED_MINIMIZED.value,
             }
 
         rect = wintypes.RECT()
@@ -210,6 +224,7 @@ class NativeCaptureEngine:
                 "status": "window_zero_bounds",
                 "error": f"Window has zero dimensions: {w}x{h}",
                 "hwnd": hwnd,
+                "state": CaptureState.FAILED.value,
             }
 
         hwnd_dc = user32.GetDC(wintypes.HWND(hwnd))
@@ -241,8 +256,14 @@ class NativeCaptureEngine:
         # If img is all black (which can happen if PrintWindow returned black surface), fallback to screen crop
         if img and self._is_completely_black(img):
             fallback_img, fallback_meta = self._capture_screen_crop(rect, hwnd, start_time)
-            if fallback_img:
+            if fallback_img and not self._is_completely_black(fallback_img):
                 return fallback_img, fallback_meta
+            return None, {
+                "status": "black_frame_rejected",
+                "error": "Target window frame was completely black (DRM or composition restricted).",
+                "hwnd": hwnd,
+                "state": CaptureState.DEGRADED.value,
+            }
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         meta = {
@@ -254,7 +275,9 @@ class NativeCaptureEngine:
             "backend": backend_used,
             "elapsed_ms": round(elapsed_ms, 2),
             "frame_id": self._frame_counter,
+            "qpc_timestamp": time.perf_counter(),
             "timestamp": time.time(),
+            "state": CaptureState.CAPTURING.value if img else CaptureState.FAILED.value,
         }
         return img, meta
 
@@ -267,6 +290,14 @@ class NativeCaptureEngine:
 
         w = rect.right - rect.left
         h = rect.bottom - rect.top
+        if w <= 0 or h <= 0:
+            return None, {
+                "status": "window_zero_bounds",
+                "error": f"Invalid screen crop bounds: {w}x{h}",
+                "hwnd": hwnd,
+                "state": CaptureState.FAILED.value,
+            }
+
         screen_dc = user32.GetDC(0)
         mem_dc = gdi32.CreateCompatibleDC(screen_dc)
         bitmap = gdi32.CreateCompatibleBitmap(screen_dc, w, h)
@@ -290,7 +321,9 @@ class NativeCaptureEngine:
             "backend": "gdi_screen_crop",
             "elapsed_ms": round(elapsed_ms, 2),
             "frame_id": self._frame_counter,
+            "qpc_timestamp": time.perf_counter(),
             "timestamp": time.time(),
+            "state": CaptureState.CAPTURING.value if img else CaptureState.FAILED.value,
         }
         return img, meta
 
@@ -357,7 +390,9 @@ class NativeCaptureEngine:
             "backend": "mock_synthetic",
             "elapsed_ms": round(elapsed_ms, 2),
             "frame_id": self._frame_counter,
+            "qpc_timestamp": time.perf_counter(),
             "timestamp": time.time(),
+            "state": CaptureState.CAPTURING.value,
         }
         return img, meta
 

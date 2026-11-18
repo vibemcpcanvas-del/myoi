@@ -374,6 +374,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     print(f"[*] 서버 주소: {server_url}")
     print(f"[*] 프로세스 PID: {os.getpid()}")
+    try:
+        from src.capture import WindowFinder
+        finder = WindowFinder(mock_mode=config.mock_inference)
+        wins = finder.list_windows()
+        print(f"[*] Native WGC Sidecar: 준비 완료 ({len(wins)}개 대상 창 감지 가능)")
+    except Exception as e:
+        print(f"[!] Native WGC Sidecar: 비활성 ({e})")
     print("------------------------------------------------------------------------")
     print("  * 서버를 종료하시려면 이 창을 닫거나, '종료하기.bat'을 실행하십시오.")
     print("========================================================================")
@@ -588,6 +595,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     in_use = is_port_in_use(host, port)
     healthy = check_health(host, port) if in_use else False
 
+    capture_info = "UNAVAILABLE"
+    try:
+        from src.capture import WindowFinder
+        finder = WindowFinder(mock_mode=config.mock_inference)
+        wins = finder.list_windows()
+        capture_info = f"ACTIVE ({len(wins)} capturable windows discovered)"
+    except Exception as e:
+        capture_info = f"UNAVAILABLE ({e})"
+
     print("========================================================================")
     print("  SCHALE Tactical Tracking Server Status")
     print("========================================================================")
@@ -595,8 +611,35 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  - Active Server PID: {active_pid if active_pid else 'None (Not Running)'}")
     print(f"  - Port Listening   : {'YES' if in_use else 'NO'}")
     print(f"  - Health Endpoint  : {'ONLINE (200 OK)' if healthy else 'OFFLINE'}")
+    print(f"  - Native WGC Capture: {capture_info}")
     print("========================================================================")
     return 0 if (active_pid and healthy) else 1
+
+
+def cmd_capture(args: argparse.Namespace) -> int:
+    """CLI handler for inspecting Native WGC capturable windows."""
+    from src.capture import WindowFinder, NativeCaptureEngine
+    print("========================================================================")
+    print("  SCHALE Native WGC / Desktop Window Capture")
+    print("========================================================================")
+    finder = WindowFinder()
+    if args.list:
+        windows = finder.list_windows()
+        print(f"Discovered {len(windows)} visible windows:")
+        for w in windows:
+            print(f"  [{w.hwnd}] {w.title} ({w.process_name}) {w.width}x{w.height}")
+        return 0
+    target = args.window or 0
+    engine = NativeCaptureEngine()
+    print(f"[*] Capturing frame for target: {target}")
+    img, meta = engine.capture_frame(int(target) if str(target).isdigit() else target)
+    print("Capture Result Meta:", meta)
+    if img:
+        print(f"Successfully captured image: size={img.size}, mode={img.mode}")
+        return 0
+    else:
+        print("[!] Capture returned no image.")
+        return 1
 
 
 def cmd_shortcut(args: argparse.Namespace) -> int:
@@ -638,6 +681,11 @@ def main() -> int:
     p_status.add_argument("--host", default=None)
     p_status.add_argument("--port", type=int, default=None)
     p_status.set_defaults(func=cmd_status)
+
+    p_cap = subparsers.add_parser("capture", help="Enumerate or capture game windows")
+    p_cap.add_argument("--list", action="store_true", help="List capturable windows")
+    p_cap.add_argument("--window", default=0, help="Target HWND or window name")
+    p_cap.set_defaults(func=cmd_capture)
 
     p_sc = subparsers.add_parser("shortcut", help="Create desktop shortcut")
     p_sc.set_defaults(func=cmd_shortcut)

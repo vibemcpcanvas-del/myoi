@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from PIL import Image
 
 from src.capture.window_finder import WindowFinder, WindowInfo
-from src.capture.wgc_capture import NativeCaptureEngine
+from src.capture.wgc_capture import NativeCaptureEngine, CaptureState
 
 logger = logging.getLogger("schale.capture")
 
@@ -29,8 +29,11 @@ class CaptureTelemetry:
     avg_latency_ms: float = 0.0
     last_frame_timestamp: float = 0.0
     status: str = "idle"
+    state: str = CaptureState.IDLE.value
     target_window: Optional[Dict[str, Any]] = None
     backend: str = "none"
+    seq_id: int = 0
+    stalled: bool = False
 
 
 class CaptureService:
@@ -43,6 +46,8 @@ class CaptureService:
 
         self._lock = threading.Lock()
         self._is_running = False
+        self._current_state = CaptureState.IDLE
+        self._last_frame_perf = 0.0
         self._target_hwnd: int = 0
         self._target_info: Optional[WindowInfo] = None
         self._target_fps: int = 20
@@ -67,19 +72,28 @@ class CaptureService:
     def is_running(self) -> bool:
         return self._is_running
 
+    @property
+    def current_state(self) -> CaptureState:
+        with self._lock:
+            return self._current_state
+
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
             return {
                 "running": self._is_running,
                 "status": self._telemetry.status,
+                "state": self._telemetry.state,
                 "targetHwnd": self._target_hwnd,
                 "targetWindow": self._target_info.to_dict() if self._target_info else None,
                 "targetFps": self._target_fps,
                 "actualFps": round(self._telemetry.fps, 1),
                 "totalFrames": self._telemetry.total_frames,
+                "droppedFrames": self._telemetry.dropped_frames,
                 "avgLatencyMs": round(self._telemetry.avg_latency_ms, 2),
                 "backend": self._telemetry.backend,
                 "lastFrameTimestamp": self._telemetry.last_frame_timestamp,
+                "seqId": self._telemetry.seq_id,
+                "stalled": self._telemetry.stalled,
             }
 
     def list_windows(self) -> List[Dict[str, Any]]:
@@ -123,7 +137,11 @@ class CaptureService:
             self._quality = max(10, min(quality, 100))
             self._stop_event.clear()
             self._is_running = True
+            self._current_state = CaptureState.CAPTURING
+            self._last_frame_perf = time.perf_counter()
             self._telemetry.status = "capturing"
+            self._telemetry.state = CaptureState.CAPTURING.value
+            self._telemetry.stalled = False
             self._telemetry.target_window = target_info.to_dict() if target_info else None
 
             self._worker_thread = threading.Thread(
@@ -138,12 +156,13 @@ class CaptureService:
                 "targetHwnd": self._target_hwnd,
                 "targetTitle": target_info.title if target_info else "전체 데스크톱",
                 "fps": self._target_fps,
+                "state": CaptureState.CAPTURING.value,
             }
 
     def stop_capture(self) -> Dict[str, Any]:
         with self._lock:
             self._stop_worker_locked()
-            return {"success": True, "status": "stopped"}
+            return {"success": True, "status": "stopped", "state": CaptureState.STOPPED.value}
 
     def _stop_worker_locked(self) -> None:
         self._is_running = False
@@ -151,13 +170,32 @@ class CaptureService:
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=1.0)
         self._worker_thread = None
+        self._current_state = CaptureState.STOPPED
         self._telemetry.status = "stopped"
+        self._telemetry.state = CaptureState.STOPPED.value
+        self._telemetry.stalled = False
 
     def get_latest_frame(self) -> Tuple[Optional[bytes], Dict[str, Any]]:
         with self._lock:
+            if self._current_state in (CaptureState.PAUSED_MINIMIZED, CaptureState.FAILED):
+                return None, {
+                    "status": self._current_state.value,
+                    "state": self._current_state.value,
+                    "error": "capture_not_active",
+                }
+            if self._telemetry.last_frame_timestamp > 0 and (time.time() - self._telemetry.last_frame_timestamp > 2.0):
+                return None, {
+                    "status": "stale_frame",
+                    "state": CaptureState.DEGRADED.value,
+                    "error": "frame_timeout",
+                }
             return self._latest_jpeg, dict(self._latest_meta)
 
     def get_latest_image(self) -> Optional[Image.Image]:
+        with self._lock:
+            if self._current_state in (CaptureState.PAUSED_MINIMIZED, CaptureState.FAILED):
+                return None
+            return self._latest_image.copy() if self._latest_image else None
         with self._lock:
             return self._latest_image.copy() if self._latest_image else None
 
@@ -170,7 +208,7 @@ class CaptureService:
             self._async_queues.discard(queue)
 
     def _capture_worker_loop(self) -> None:
-        """Continuous capture loop running on dedicated worker thread."""
+        """Continuous capture loop running on dedicated worker thread with fail-closed watchdog."""
         interval = 1.0 / float(self._target_fps)
         latencies: List[float] = []
 
@@ -183,14 +221,23 @@ class CaptureService:
                 if img is not None:
                     jpeg_bytes = self.engine.encode_jpeg(img, quality=self._quality)
                     now = time.time()
+                    p_now = time.perf_counter()
 
                     with self._lock:
                         self._latest_image = img
                         self._latest_jpeg = jpeg_bytes
                         self._latest_meta = meta
                         self._telemetry.total_frames += 1
+                        self._telemetry.seq_id += 1
+                        meta["seq_id"] = self._telemetry.seq_id
+                        meta["state"] = CaptureState.CAPTURING.value
                         self._telemetry.last_frame_timestamp = now
                         self._telemetry.backend = meta.get("backend", "unknown")
+                        self._telemetry.status = "capturing"
+                        self._telemetry.state = CaptureState.CAPTURING.value
+                        self._telemetry.stalled = False
+                        self._current_state = CaptureState.CAPTURING
+                        self._last_frame_perf = p_now
 
                         # Track FPS
                         self._frame_times.append(now)
@@ -207,18 +254,74 @@ class CaptureService:
                             latencies.pop(0)
                         self._telemetry.avg_latency_ms = sum(latencies) / max(1, len(latencies))
 
-                    # Broadcast to async WebSocket queues
+                    # Broadcast frame to async WebSocket queues
                     self._dispatch_frame_to_queues(jpeg_bytes, meta)
                 else:
-                    status = meta.get("status", "capture_error")
+                    status_str = meta.get("status", "capture_error")
+                    if status_str == "window_minimized":
+                        new_state = CaptureState.PAUSED_MINIMIZED
+                    elif status_str in ("window_not_found", "window_zero_bounds"):
+                        new_state = CaptureState.FAILED
+                    else:
+                        new_state = CaptureState.DEGRADED
+
                     with self._lock:
-                        self._telemetry.status = status
+                        self._current_state = new_state
+                        self._telemetry.status = status_str
+                        self._telemetry.state = new_state.value
                         self._telemetry.dropped_frames += 1
+                        self._telemetry.stalled = True
+
+                    # Broadcast state transition immediately to WebSocket consumers
+                    self._dispatch_control_to_queues({
+                        "type": "capture_state",
+                        "state": new_state.value,
+                        "status": status_str,
+                        "error": meta.get("error", "Capture degraded"),
+                        "hwnd": self._target_hwnd,
+                        "timestamp": time.time(),
+                    })
             except Exception as e:
                 logger.warning(f"Error in capture worker loop: {e}")
                 with self._lock:
+                    self._current_state = CaptureState.FAILED
                     self._telemetry.status = "error"
+                    self._telemetry.state = CaptureState.FAILED.value
                     self._telemetry.dropped_frames += 1
+                    self._telemetry.stalled = True
+
+                self._dispatch_control_to_queues({
+                    "type": "capture_state",
+                    "state": CaptureState.FAILED.value,
+                    "status": "error",
+                    "error": str(e),
+                    "hwnd": self._target_hwnd,
+                    "timestamp": time.time(),
+                })
+
+            # Fail-closed stale watchdog: flag DEGRADED if no frame captured for > 1.0s
+            watchdog_alert = False
+            with self._lock:
+                if (
+                    self._current_state == CaptureState.CAPTURING
+                    and self._last_frame_perf > 0
+                    and (time.perf_counter() - self._last_frame_perf > 1.0)
+                ):
+                    self._current_state = CaptureState.DEGRADED
+                    self._telemetry.state = CaptureState.DEGRADED.value
+                    self._telemetry.status = "stalled"
+                    self._telemetry.stalled = True
+                    watchdog_alert = True
+
+            if watchdog_alert:
+                self._dispatch_control_to_queues({
+                    "type": "capture_state",
+                    "state": CaptureState.DEGRADED.value,
+                    "status": "stalled",
+                    "error": "Frame capture stalled (>1.0s without fresh frame)",
+                    "hwnd": self._target_hwnd,
+                    "timestamp": time.time(),
+                })
 
             # Regulate FPS sleep
             calc_time = time.perf_counter() - t0
@@ -239,6 +342,22 @@ class CaptureService:
                     except asyncio.QueueEmpty:
                         pass
                 q.put_nowait((jpeg_bytes, meta))
+            except Exception:
+                pass
+
+    def _dispatch_control_to_queues(self, payload: Dict[str, Any]) -> None:
+        """Dispatches control/state change message to registered asyncio queues non-blockingly."""
+        with self._lock:
+            queues = list(self._async_queues)
+
+        for q in queues:
+            try:
+                if q.full():
+                    try:
+                        q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                q.put_nowait(payload)
             except Exception:
                 pass
 
