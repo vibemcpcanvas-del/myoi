@@ -171,4 +171,33 @@
 * **감사 판정**: `[PASS]`
 * **롤백 전략**: `git checkout HEAD -- src/server.py run.py WBS.md; rm 실행하기.bat 종료하기.bat 바탕화면_바로가기_만들기.bat 백그라운드_실행하기.vbs 사용방법.md scripts/launcher.py tests/test_launcher_governance.py`
 
+---
+
+### [WBS-08] 저장된 이전 세션 데이터 검수 및 영속화 관리 체계 구축
+
+* **목표 및 범위**: 사용자 요구사항("저장된 이전 데이터 검수도 가능하게끔해줘")을 충족하기 위한 세션 영속화 매니저(`src/session_manager.py`), REST API 엔드포인트(`GET/POST/DELETE /api/sessions`), 프런트엔드 이전 세션 선택 및 불러오기 모달(`static/index.html`, `static/reviewer.js`, `static/app.js`), 검수 판정 실시간 영속 저장, 디스크 기반 YOLO 내보내기 자동 fallback, Fail-Closed 보안 검증(경로 순회 차단, 0바이트 이미지 거부, 바운딩 박스 유효성 검증) 및 종합 테스트 스위트 구축.
+* **선행 의존성**: WBS-07 [PASS]
+* **담당자**: 개발자 (Antigravity Coordinator Gemini) / PM 어드바이저 (Coarena GPT-6 Luna)
+* **산출물**:
+  - `src/session_manager.py`
+  - `src/config.py`
+  - `src/server.py`
+  - `static/index.html`
+  - `static/reviewer.js`
+  - `static/app.js`
+  - `tests/test_session_storage.py`
+  - `WBS.md`
+* **인수 기준**:
+  1. `SessionManager` 핵심 메서드 및 `/api/sessions` 전 엔드포인트 100% 정상 작동.
+  2. 악의적 경로 순회 공격(`..`, 슬래시, 널 바이트 등) 및 0바이트 손상 이미지 시스템적 차단(Fail-Closed).
+  3. 프런트엔드 검수 센터 내 '이전 세션 불러오기' 모달 및 세션 목록(세션 ID, 프레임 수, 승인/대기/제외 통계, 일시) 렌더링 정상 작동.
+  4. 이전 세션 선택 시 캔버스 및 라벨 데이터 즉시 로드 및 트리아지 검수/수정 가능.
+  5. 세션 데이터 수정 후 서버 영속 저장(`POST /api/sessions/save`) 및 YOLO 데이터셋 ZIP 다운로드 정상 작동.
+  6. 스트리밍 스냅샷 수집 시 세션 자동 영속화로 이전 세션 목록에서 즉시 검색 가능.
+  7. 신규 47종 세션 스토리지 테스트 포함 전체 133개 테스트 100% PASS 및 무회귀 입증.
+  8. WBS 게이트 유효성 검사기(`python scripts/wbs_gate_validator.py`) 100% 통과.
+* **감사 판정**: `[AUDIT_PENDING]`
+* **롤백 전략**: `git checkout HEAD -- src/config.py src/server.py static/ WBS.md; rm src/session_manager.py tests/test_session_storage.py`
+
+
 

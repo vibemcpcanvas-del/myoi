@@ -38,7 +38,9 @@ from src.aspects.telemetry import (
 )
 from src.config import AppConfig, get_config
 from src.multipart_parser import parse_multipart_body
+from src.session_manager import SessionManager, get_session_manager
 from src.yolo_exporter import validate_and_build_yolo_dataset
+
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 PID_FILE = Path(__file__).resolve().parent.parent / ".server.pid"
@@ -420,6 +422,26 @@ async def export_yolo_zip(request: Request):
                 detail={"error": "invalid_image_base64", "message": f"Failed to decode image '{fname}': {e}"},
             )
 
+    # Automatic disk fallback: for any approved records whose images were omitted from payload,
+    # attempt resolution from persisted sessions on disk
+    cfg = get_config()
+    mgr = get_session_manager(base_dir=cfg.data_dir)
+    for rec in records:
+        if rec.get("reviewStatus") == "approved":
+            img_file = rec.get("imageFile", "")
+            img_name = Path(img_file).name
+            if img_file not in image_data_map and img_name not in image_data_map:
+                sess_id = rec.get("sessionId")
+                if sess_id:
+                    try:
+                        disk_path = mgr.get_image_file_path(sess_id, img_file)
+                        if disk_path and disk_path.exists() and disk_path.stat().st_size > 0:
+                            raw_b = disk_path.read_bytes()
+                            image_data_map[img_file] = raw_b
+                            image_data_map[img_name] = raw_b
+                    except Exception:
+                        pass
+
     try:
         zip_bytes, report = validate_and_build_yolo_dataset(records, image_data_map, classes=classes)
     except ValueError as e:
@@ -433,6 +455,141 @@ async def export_yolo_zip(request: Request):
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="schale_yolo_dataset.zip"'},
     )
+
+
+# ============================================================================
+# Session Persistence and Historical Data Retrieval Endpoints
+# ============================================================================
+
+@app.get("/api/sessions")
+@measure_telemetry(metric_name="api_list_sessions")
+async def list_sessions_endpoint() -> Dict[str, Any]:
+    """Lists all historical and current sessions persisted on disk."""
+    cfg = get_config()
+    mgr = get_session_manager(base_dir=cfg.data_dir)
+    sessions = mgr.list_sessions()
+    return {
+        "success": True,
+        "count": len(sessions),
+        "sessions": sessions,
+    }
+
+
+@app.get("/api/sessions/{session_id}")
+@measure_telemetry(metric_name="api_get_session")
+async def get_session_endpoint(session_id: str) -> Dict[str, Any]:
+    """Retrieves a historical session with all records and base64 image data URLs."""
+    cfg = get_config()
+    mgr = get_session_manager(base_dir=cfg.data_dir)
+    try:
+        session_data = mgr.load_session(session_id, include_base64=True)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_session_id", "message": str(e)},
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "session_not_found", "message": str(e)},
+        )
+    return session_data
+
+
+@app.post("/api/sessions/save")
+@app.post("/api/sessions/{session_id}/save")
+@measure_telemetry(metric_name="api_save_session")
+async def save_session_endpoint(request: Request, session_id: Optional[str] = None) -> Dict[str, Any]:
+    """Persists or updates a review session with frame images, bounding boxes, and metadata."""
+    cfg = get_config()
+    mgr = get_session_manager(base_dir=cfg.data_dir)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_json_body", "message": "Expected JSON payload."},
+        )
+
+    target_session_id = session_id or body.get("sessionId")
+    if not target_session_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "missing_session_id", "message": "sessionId is required."},
+        )
+
+    records = body.get("records", [])
+    classes = body.get("classes")
+    metadata = body.get("metadata")
+
+    try:
+        result = mgr.save_session(
+            session_id=target_session_id,
+            records=records,
+            classes=classes,
+            metadata=metadata,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "session_validation_error", "message": str(e)},
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "session_save_failed", "message": str(e)},
+        )
+
+    return result
+
+
+@app.delete("/api/sessions/{session_id}")
+@measure_telemetry(metric_name="api_delete_session")
+async def delete_session_endpoint(session_id: str) -> Dict[str, Any]:
+    """Deletes a historical session and its assets from disk."""
+    cfg = get_config()
+    mgr = get_session_manager(base_dir=cfg.data_dir)
+    try:
+        mgr.delete_session(session_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_session_id", "message": str(e)},
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "session_not_found", "message": str(e)},
+        )
+    return {"success": True, "message": f"Session '{session_id}' deleted successfully."}
+
+
+@app.get("/api/sessions/{session_id}/images/{filename:path}")
+async def get_session_image_endpoint(session_id: str, filename: str):
+    """Serves a static image belonging to a saved session."""
+    cfg = get_config()
+    mgr = get_session_manager(base_dir=cfg.data_dir)
+    try:
+        img_path = mgr.get_image_file_path(session_id, filename)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_path", "message": str(e)},
+        )
+    if not img_path or not img_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "image_not_found", "message": f"Image '{filename}' not found in session '{session_id}'."},
+        )
+    media_type = "image/jpeg"
+    if img_path.suffix.lower() == ".png":
+        media_type = "image/png"
+    elif img_path.suffix.lower() == ".webp":
+        media_type = "image/webp"
+
+    return FileResponse(img_path, media_type=media_type)
+
 
 
 if STATIC_DIR.exists():

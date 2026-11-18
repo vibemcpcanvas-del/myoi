@@ -45,6 +45,12 @@
             this.ctx = this.canvas ? this.canvas.getContext('2d') : null;
             this.imgElement = new Image();
 
+            // Session Persistence & Historical Retrieval State
+            this.currentSessionId = null;
+            this.isSavingSession = false;
+            this.autoSaveTimer = null;
+            this.cachedSessions = [];
+
             this.bindEvents();
         }
 
@@ -86,10 +92,47 @@
             };
             $('btnOpenReview').onclick = () => {
                 $('reviewModal').classList.remove('hidden');
+                this.updateSessionBadge();
                 this.renderList();
                 if (this.currentRecordIndex >= 0) this.selectRecord(this.currentRecordIndex);
                 else if (this.records.length > 0) this.selectRecord(0);
             };
+
+            // Session Persistence & Historical Retrieval Controls
+            const btnOpenSessionModal = $('btnOpenSessionModal');
+            if (btnOpenSessionModal) {
+                btnOpenSessionModal.onclick = () => this.openSessionModal();
+            }
+
+            const btnOpenSessionListMain = $('btnOpenSessionListMain');
+            if (btnOpenSessionListMain) {
+                btnOpenSessionListMain.onclick = () => this.openSessionModal();
+            }
+
+            const btnCloseSessionModal = $('btnCloseSessionModal');
+            if (btnCloseSessionModal) {
+                btnCloseSessionModal.onclick = () => this.closeSessionModal();
+            }
+
+            const btnCloseSessionModalFooter = $('btnCloseSessionModalFooter');
+            if (btnCloseSessionModalFooter) {
+                btnCloseSessionModalFooter.onclick = () => this.closeSessionModal();
+            }
+
+            const btnRefreshSessions = $('btnRefreshSessions');
+            if (btnRefreshSessions) {
+                btnRefreshSessions.onclick = () => this.refreshSessionList();
+            }
+
+            const inputSessionSearch = $('inputSessionSearch');
+            if (inputSessionSearch) {
+                inputSessionSearch.oninput = (e) => this.renderSessionList(e.target.value);
+            }
+
+            const btnSaveSession = $('btnSaveSession');
+            if (btnSaveSession) {
+                btnSaveSession.onclick = () => this.saveCurrentSessionToServer(false);
+            }
 
             // Canvas Interaction & Wheel Zoom
             if (this.canvas) {
@@ -871,6 +914,7 @@
             this.dragHandle = null;
             this.activeBoxInitial = null;
             this.drawCanvas();
+            this.scheduleAutoSave();
         }
 
         deleteSelectedBox() {
@@ -889,6 +933,7 @@
             this.selectedBoxIndex = -1;
             this.drawCanvas();
             this.renderList();
+            this.scheduleAutoSave();
         }
 
         toggleAddBoxMode() {
@@ -943,6 +988,7 @@
             }
 
             this.drawCanvas();
+            this.scheduleAutoSave();
         }
 
         setDecision(status) {
@@ -992,6 +1038,7 @@
 
             this.updateCounts();
             this.renderList();
+            this.scheduleAutoSave();
 
             // Auto-advance to next record matching current filter
             const filtered = this.getFilteredIndices();
@@ -1014,6 +1061,280 @@
                 }
                 const meta = document.getElementById('inspectorMeta');
                 if (meta) meta.innerText = '해당 조건의 프레임이 없습니다.';
+            }
+        }
+
+        // ========================================================================
+        // Session Persistence & Historical Retrieval Engine
+        // ========================================================================
+
+        updateSessionBadge() {
+            const lbl = document.getElementById('lblCurrentSession');
+            if (lbl) {
+                const sid = this.currentSessionId || (window.AppState ? window.AppState.sessionId : '-');
+                lbl.innerText = sid;
+            }
+        }
+
+        scheduleAutoSave() {
+            if (typeof window === 'undefined' || !window.fetch) return;
+            if (this.autoSaveTimer) {
+                clearTimeout(this.autoSaveTimer);
+            }
+            this.autoSaveTimer = setTimeout(() => {
+                this.saveCurrentSessionToServer(true);
+            }, 1000);
+        }
+
+        openSessionModal() {
+            const modal = document.getElementById('sessionModal');
+            if (modal) {
+                modal.classList.remove('hidden');
+                this.refreshSessionList();
+            }
+        }
+
+        closeSessionModal() {
+            const modal = document.getElementById('sessionModal');
+            if (modal) {
+                modal.classList.add('hidden');
+            }
+        }
+
+        async listSessionsFromServer() {
+            try {
+                const res = await fetch('/api/sessions');
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                return data.sessions || [];
+            } catch (err) {
+                console.error('[Reviewer] Failed to list sessions:', err);
+                return [];
+            }
+        }
+
+        async refreshSessionList() {
+            const container = document.getElementById('sessionListContainer');
+            const badge = document.getElementById('sessionCountBadge');
+            if (container) {
+                container.innerHTML = `<div class="text-center text-xs text-gray-400 py-12 font-bold">세션 목록을 조회 중입니다...</div>`;
+            }
+            const sessions = await this.listSessionsFromServer();
+            this.cachedSessions = sessions;
+            if (badge) badge.innerText = `${sessions.length}개`;
+            const searchInput = document.getElementById('inputSessionSearch');
+            const q = searchInput ? searchInput.value : '';
+            this.renderSessionList(q);
+        }
+
+        renderSessionList(query = '') {
+            const container = document.getElementById('sessionListContainer');
+            if (!container) return;
+
+            const cleanQ = (query || '').trim().toLowerCase();
+            const filtered = (this.cachedSessions || []).filter(s => {
+                if (!cleanQ) return true;
+                return (s.sessionId || '').toLowerCase().includes(cleanQ);
+            });
+
+            if (filtered.length === 0) {
+                container.innerHTML = `
+                    <div class="text-center text-xs text-gray-400 py-12 font-bold space-y-1">
+                        <div>${cleanQ ? '검색된 세션이 없습니다.' : '저장된 이전 세션이 없습니다.'}</div>
+                        <div class="text-[11px] text-gray-500">현재 수집 중인 세션을 '세션 저장' 버튼으로 저장하면 이곳에 표시됩니다.</div>
+                    </div>`;
+                return;
+            }
+
+            const curSessId = this.currentSessionId || (window.AppState ? window.AppState.sessionId : '');
+
+            container.innerHTML = filtered.map(s => {
+                const isCurrent = (s.sessionId === curSessId);
+                const counts = s.statusCounts || { all: 0, pending: 0, approved: 0, rejected: 0 };
+                const dtStr = s.updatedAtUtc || s.createdAtUtc || '';
+                const dateDisplay = dtStr ? dtStr.replace('T', ' ').slice(0, 19) + ' UTC' : '-';
+
+                return `
+                <div class="p-3.5 rounded-lg border ${isCurrent ? 'border-[var(--p)] bg-blue-50/60 dark:bg-blue-950/30' : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800/80'} hover:border-[var(--p)] hover:shadow-sm transition flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 mb-1 flex-wrap">
+                            <span class="font-mono font-bold text-sm text-[var(--p)] break-all">${s.sessionId}</span>
+                            ${isCurrent ? '<span class="text-[10px] bg-sky-100 dark:bg-sky-900 text-sky-700 dark:text-sky-300 font-bold px-1.5 py-0.5 rounded">현재 세션</span>' : ''}
+                        </div>
+                        <div class="flex items-center gap-3 text-xs text-gray-500 dark:text-gray-400 font-mono flex-wrap">
+                            <span>📅 ${dateDisplay}</span>
+                            <span>🖼️ ${s.recordCount}개 프레임</span>
+                            <span>🎯 객체 ${s.totalObjects || 0}건</span>
+                        </div>
+                        <div class="flex items-center gap-2 mt-2 text-xs">
+                            <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300">승인: ${counts.approved || 0}</span>
+                            <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300">대기: ${counts.pending || 0}</span>
+                            <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300">제외: ${counts.rejected || 0}</span>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2 flex-shrink-0 self-end sm:self-center">
+                        <button class="ba-btn h-8 px-4 text-xs font-bold whitespace-nowrap cursor-pointer btn-load-session" onclick="window.Reviewer.loadSessionFromServer('${s.sessionId}')">
+                            <span>불러오기</span>
+                        </button>
+                        <button class="ba-btn red h-8 px-3 text-xs font-bold whitespace-nowrap cursor-pointer btn-delete-session" onclick="window.Reviewer.deleteSessionFromServer('${s.sessionId}')">
+                            <span>삭제</span>
+                        </button>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        async loadSessionFromServer(sessionId) {
+            if (!sessionId) return;
+            try {
+                const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail?.message || `HTTP ${res.status}`);
+                }
+                const data = await res.json();
+                this.clearRecords();
+                this.currentSessionId = data.sessionId || sessionId;
+
+                // Synchronize AppState sessionId and classes
+                if (window.AppState) {
+                    window.AppState.sessionId = this.currentSessionId;
+                    if (data.classes && typeof data.classes === 'object' && Object.keys(data.classes).length > 0) {
+                        Object.assign(window.AppState.cls, data.classes);
+                        try {
+                            localStorage.setItem('schale_cls_v3', JSON.stringify(window.AppState.cls));
+                        } catch (e) {}
+                        if (typeof window.renderCls === 'function') {
+                            window.renderCls();
+                        }
+                    }
+                }
+
+                const txtSess = document.getElementById('txtSessionId');
+                if (txtSess) txtSess.innerText = this.currentSessionId;
+
+                // Populate records
+                const recs = data.records || [];
+                this.records = recs;
+                this.currentRecordIndex = recs.length > 0 ? 0 : -1;
+                this.updateCounts();
+                this.renderList();
+                if (this.currentRecordIndex >= 0) {
+                    this.selectRecord(0);
+                }
+                this.updateSessionBadge();
+                this.closeSessionModal();
+
+                // Open Review Center modal
+                const revModal = document.getElementById('reviewModal');
+                if (revModal) revModal.classList.remove('hidden');
+
+                if (typeof window.toast === 'function') {
+                    window.toast(`세션 '${sessionId}' 불러오기 완료 (${recs.length}개 프레임)`);
+                }
+            } catch (err) {
+                console.error('[Reviewer] Failed to load session:', err);
+                showAlert(`세션 불러오기 실패: ${err.message}`);
+            }
+        }
+
+        async saveCurrentSessionToServer(silent = false) {
+            if (this.isSavingSession) return;
+            const sessId = this.currentSessionId || (window.AppState ? window.AppState.sessionId : 'SES_DEFAULT');
+            if (!this.records || this.records.length === 0) {
+                if (!silent) showAlert('저장할 프레임이 없습니다.');
+                return;
+            }
+
+            this.isSavingSession = true;
+            const btnSave = document.getElementById('btnSaveSession');
+            if (btnSave && !silent) {
+                btnSave.classList.add('opacity-70', 'pointer-events-none');
+                btnSave.querySelector('span').innerText = '저장 중...';
+            }
+
+            try {
+                const payload = {
+                    sessionId: sessId,
+                    records: this.records,
+                    classes: (window.AppState && window.AppState.cls) ? window.AppState.cls : {},
+                    metadata: {
+                        savedAtUtc: new Date().toISOString(),
+                        clientUserAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'Node/Client'
+                    }
+                };
+
+                const res = await fetch('/api/sessions/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail?.message || `HTTP ${res.status}`);
+                }
+
+                const resData = await res.json();
+                this.currentSessionId = sessId;
+                this.updateSessionBadge();
+
+                if (!silent) {
+                    if (typeof window.toast === 'function') {
+                        window.toast(`세션 '${sessId}' 저장 완료 (${this.records.length}개 프레임)`);
+                    } else {
+                        showAlert(`세션 '${sessId}' 저장 완료 (${this.records.length}개 프레임)`);
+                    }
+                }
+                return resData;
+            } catch (err) {
+                console.error('[Reviewer] Failed to save session:', err);
+                if (!silent) {
+                    showAlert(`세션 저장 실패: ${err.message}`);
+                }
+            } finally {
+                this.isSavingSession = false;
+                if (btnSave && !silent) {
+                    btnSave.classList.remove('opacity-70', 'pointer-events-none');
+                    btnSave.querySelector('span').innerText = '💾 세션 저장';
+                }
+            }
+        }
+
+        async deleteSessionFromServer(sessionId) {
+            if (!sessionId) return;
+            const conf = confirm(`정말로 세션 '${sessionId}'을(를) 디스크에서 영구 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.`);
+            if (!conf) return;
+
+            try {
+                const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+                    method: 'DELETE'
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail?.message || `HTTP ${res.status}`);
+                }
+
+                // If active session was deleted, clear records and generate new session ID
+                if (this.currentSessionId === sessionId) {
+                    this.clearRecords();
+                    if (typeof window.generateSessionId === 'function') {
+                        const newId = window.generateSessionId();
+                        this.currentSessionId = newId;
+                        if (window.AppState) window.AppState.sessionId = newId;
+                        const txtSess = document.getElementById('txtSessionId');
+                        if (txtSess) txtSess.innerText = newId;
+                    }
+                    this.updateSessionBadge();
+                }
+
+                await this.refreshSessionList();
+                if (typeof window.toast === 'function') {
+                    window.toast(`세션 '${sessionId}' 삭제 완료`);
+                }
+            } catch (err) {
+                console.error('[Reviewer] Failed to delete session:', err);
+                showAlert(`세션 삭제 실패: ${err.message}`);
             }
         }
     }

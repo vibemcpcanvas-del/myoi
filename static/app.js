@@ -66,6 +66,13 @@
         return `SES_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
     }
 
+    window.generateSessionId = generateSessionId;
+    window.AppState = state;
+    if (window.Reviewer) {
+        window.Reviewer.currentSessionId = state.sessionId;
+        window.Reviewer.updateSessionBadge();
+    }
+
     $('txtSessionId').innerText = state.sessionId;
 
     // --- Day/Night Ops Dual-Theme Engine ---
@@ -259,8 +266,16 @@
         toast("클래스 목록 초기화됨");
     };
 
-    $('btnNewSession').onclick = () => {
+    $('btnNewSession').onclick = async () => {
+        if (window.Reviewer && window.Reviewer.records.length > 0) {
+            await window.Reviewer.saveCurrentSessionToServer(true);
+        }
         state.sessionId = generateSessionId();
+        if (window.Reviewer) {
+            window.Reviewer.currentSessionId = state.sessionId;
+            window.Reviewer.clearRecords();
+            window.Reviewer.updateSessionBadge();
+        }
         $('txtSessionId').innerText = state.sessionId;
         toast(`새 세션 시작: ${state.sessionId}`);
     };
@@ -269,6 +284,10 @@
         if (confirm("현재 세션에 수집된 프레임을 모두 버리시겠습니까?")) {
             window.Reviewer.clearRecords();
             state.sessionId = generateSessionId();
+            if (window.Reviewer) {
+                window.Reviewer.currentSessionId = state.sessionId;
+                window.Reviewer.updateSessionBadge();
+            }
             $('txtSessionId').innerText = state.sessionId;
             toast("세션 및 수집 데이터 초기화됨");
         }
@@ -302,6 +321,7 @@
             </div>`;
         }).join('');
     };
+    window.renderCls = renderCls;
 
     $('classList').onchange = e => {
         const p = e.target.closest('[data-id]');
@@ -353,6 +373,10 @@
         if (state.stream) {
             state.stream.getTracks().forEach(t => t.stop());
             state.stream = null;
+        }
+
+        if (window.Reviewer && window.Reviewer.records.length > 0) {
+            window.Reviewer.saveCurrentSessionToServer(true);
         }
 
         $('vid').srcObject = null;
@@ -738,6 +762,9 @@
             };
 
             window.Reviewer.addRecord(record);
+            if (window.Reviewer && typeof window.Reviewer.scheduleAutoSave === 'function') {
+                window.Reviewer.scheduleAutoSave();
+            }
             toast(`스냅샷 수집 완료 (${vw}x${vh})`);
         } catch (err) {
             state.errorCount++;

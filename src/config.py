@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Optional
 
 DEFAULT_INFERENCE_API_URL = "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict"
+DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "sessions"
+
 
 
 def normalize_inference_url(raw_url: Optional[str]) -> str:
@@ -122,6 +124,7 @@ class AppConfig:
     mock_inference: bool = False
     request_timeout_sec: float = 30.0
     max_upload_size_bytes: int = 10 * 1024 * 1024  # 10 MB
+    data_dir: Path = DEFAULT_DATA_DIR
 
     @property
     def is_api_key_configured(self) -> bool:
@@ -152,6 +155,14 @@ def get_config() -> AppConfig:
     port_val = os.getenv("SCHALE_PORT") or dotenv_vars.get("SCHALE_PORT", "8000")
     port = int(port_val)
 
+    data_dir_env = (
+        os.getenv("SCHALE_DATA_DIR")
+        or os.getenv("DATA_DIR")
+        or dotenv_vars.get("SCHALE_DATA_DIR")
+        or dotenv_vars.get("DATA_DIR")
+    )
+    data_dir = Path(data_dir_env).resolve() if data_dir_env else DEFAULT_DATA_DIR
+
     return AppConfig(
         host=host,
         port=port,
@@ -159,4 +170,5 @@ def get_config() -> AppConfig:
         inference_api_key=api_key,
         mock_inference=mock_mode,
         request_timeout_sec=timeout,
+        data_dir=data_dir,
     )
