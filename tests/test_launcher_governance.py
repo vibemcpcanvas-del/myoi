@@ -159,9 +159,21 @@ def test_batch_launchers_hygiene():
 
 
 def test_batch_execution_syntax():
-    """Verify cmd.exe parses 종료하기.bat and 바탕화면_바로가기_만들기.bat without syntax/encoding errors."""
+    """Verify cmd.exe parses 실행하기.bat, 종료하기.bat and 바탕화면_바로가기_만들기.bat without syntax/encoding errors."""
     if os.name != "nt":
         pytest.skip("Windows batch execution requires Windows OS")
+
+    res_run = subprocess.run(
+        ["cmd.exe", "/c", "실행하기.bat", "--no-pause", "--help"],
+        cwd=str(WORKSPACE_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert res_run.returncode == 0, f"실행하기.bat execution failed: {res_run.stderr} / stdout: {res_run.stdout}"
+    assert "was unexpected at this time" not in res_run.stderr
+    assert "was unexpected at this time" not in res_run.stdout
+    assert "is not recognized as an internal" not in res_run.stderr
 
     res_stop = subprocess.run(
         ["cmd.exe", "/c", "종료하기.bat"],

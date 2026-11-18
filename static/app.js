@@ -693,7 +693,6 @@
                 if (btnShare && btnShare.querySelector('span')) {
                     btnShare.querySelector('span').innerText = "연결 해제";
                 }
-                $('btnStart').classList.remove('hidden');
                 $('vid').classList.add('hidden');
                 $('wgcCanvas').classList.remove('hidden');
                 if (chkHide && chkHide.checked) {
@@ -730,6 +729,7 @@
                                 stopOps();
                             } else {
                                 toast("네이티브 WGC 캡처 연결 성공");
+                                $('btnStart').classList.remove('hidden');
                             }
                         }
                     } catch (err) {
@@ -755,6 +755,7 @@
                     state.wgcReady = true;
                     state.wgcStalled = false;
                     state.lastFrameArrival = Date.now();
+                    $('btnStart').classList.remove('hidden');
                 } catch (err) {
                     console.warn("WGC frame decode warning:", err);
                 }
@@ -780,7 +781,14 @@
                     state.wgcStalled = false;
                     const concealOverlay = $('streamConcealOverlay');
                     if (concealOverlay) concealOverlay.style.display = 'none';
-                    stopOps();
+                    // Auto-fallback to HTTP stream if disconnected unexpectedly in WGC mode
+                    if (state.captureMode === 'wgc' && !state.httpFallbackActive) {
+                        console.warn("[WGC] WebSocket 스트림 연결 끊김. HTTP 대체 스트림으로 자동 복구합니다.");
+                        $('statusTxt').innerHTML = '<span class="text-amber-500 font-medium">⚡ WebSocket 스트림 연결 끊김 -> HTTP 스트림으로 자동 복구 중...</span>';
+                        startHttpFallbackCapture(state.wgcHwnd || 0);
+                    } else {
+                        stopOps();
+                    }
                 }
             };
 

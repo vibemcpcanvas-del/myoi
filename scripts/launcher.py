@@ -697,6 +697,7 @@ def main() -> int:
     p_run.add_argument("--host", default=None)
     p_run.add_argument("--port", type=int, default=None)
     p_run.add_argument("--no-browser", action="store_true")
+    p_run.add_argument("--no-pause", action="store_true", help="Non-interactive execution flag")
     p_run.set_defaults(func=cmd_run)
 
     p_start = subparsers.add_parser("start", help="Start server in background")

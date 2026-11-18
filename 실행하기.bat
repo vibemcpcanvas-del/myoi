@@ -48,24 +48,42 @@ exit /b 1
 :: 2. 필수 패키지(websockets 등) 사전 점검 및 자동 설치 (Self-Healing)
 "%PY_CMD%" -c "import websockets" >nul 2>&1
 if errorlevel 1 (
-    echo [*] 필수 라이브러리(websockets) 누락 감지. 자동 자가 치유(Self-Healing) 설치를 진행합니다...
+    echo [*] 필수 라이브러리 websockets 누락 감지. 자동 자가 치유 Self-Healing 설치를 진행합니다...
     "%PY_CMD%" -m pip install "websockets>=12.0"
 )
 
 :: 3. 서버 실행 및 브라우저 자동 오픈
-"%PY_CMD%" scripts\launcher.py run
+"%PY_CMD%" scripts\launcher.py run %*
 set "LAUNCH_ERR=%ERRORLEVEL%"
+
+:: 옵션 플래그 파싱 (--no-pause 등 비대화형 실행 지원)
+set "NO_PAUSE="
+for %%A in (%*) do (
+    if "%%A"=="--no-pause" set "NO_PAUSE=1"
+    if "%%A"=="--help" set "NO_PAUSE=1"
+    if "%%A"=="-h" set "NO_PAUSE=1"
+)
 
 if not "%LAUNCH_ERR%"=="0" (
     echo.
     echo ========================================================================
-    echo [오류 발생] 서버 실행이 중단되었습니다. (오류 코드: %LAUNCH_ERR%)
+    echo [오류 발생] 서버 실행이 중단되었습니다. [오류 코드: %LAUNCH_ERR%]
     echo 상세한 원인은 위 메시지 또는 logs\server.log 파일을 확인해주세요.
     echo ========================================================================
     echo.
-    echo 아무 키나 누르면 창을 닫습니다...
-    pause >nul
+    if not defined NO_PAUSE (
+        echo 아무 키나 누르면 창을 닫습니다...
+        pause >nul
+    )
     exit /b %LAUNCH_ERR%
 )
 
+echo.
+echo ========================================================================
+echo [안내] SCHALE 서버 작업이 정상 종료되었습니다.
+echo ========================================================================
+if not defined NO_PAUSE (
+    echo 아무 키나 누르면 창을 닫습니다...
+    pause >nul
+)
 exit /b 0

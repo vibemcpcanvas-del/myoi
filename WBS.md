@@ -254,6 +254,37 @@
 * **감사 판정**: `[PASS]`
 * **롤백 전략**: `git checkout HEAD -- requirements.txt scripts/launcher.py 실행하기.bat src/server.py static/app.js WBS.md; rm tests/test_stream_fallback_and_self_healing.py`
 
+---
+
+### [WBS-11] 런처 및 프런트엔드 실행 결함 품질 사후 부검(Post-Mortem) 및 안티 결함 불변식 수립
+
+* **목표 및 범위**: 사용자 제보("실행하기 버튼이 나오고 바로 꺼져. 자꾸 하자있는 결과물을 주는 문제를 기록하라하고, 말한 실행하기 버튼 문제 고쳐줘")에 따른 품질 부검 및 결함 근본 해결. 배치 파일 블록 내 소괄호 파싱 충돌(`누락 was unexpected at this time`) 및 대화형 실행 시 조기 종료 문제 완전 해결, 프런트엔드 캡처 핸드셰이크 전 미성숙 실행 버튼 노출 차단 및 웹소켓 단절 시 HTTP 스트림 자동 복구, 서버 측 웹소켓 액션 예외 격리, 공식 품질 사후 부검 보고서(`docs/QUALITY_POSTMORTEM.md`) 및 교훈집(`LESSONS.md`) 작성, 실제 `cmd.exe` 프로세스 구동 스모크 테스트 구현.
+* **선행 의존성**: WBS-10 [PASS]
+* **담당자**: 개발자 (Antigravity Coordinator Gemini) / PM 어드바이저 (Coarena GPT-6 Luna)
+* **산출물**:
+  - `docs/QUALITY_POSTMORTEM.md`
+  - `LESSONS.md`
+  - `실행하기.bat`
+  - `scripts/launcher.py`
+  - `src/server.py`
+  - `static/app.js`
+  - `tests/test_launcher_governance.py`
+  - `tests/test_stream_fallback_and_self_healing.py`
+  - `WBS.md`
+* **인수 기준**:
+  1. `실행하기.bat` 내 `cmd.exe` 예약 괄호 파싱 충돌 완전 근절 및 `cmd.exe /c "실행하기.bat --no-pause --help"` 실제 구동 시 오류 코드 0 반환 입증.
+  2. 대화형 실행 시 성공(`0`) 및 오류(비`0`) 모든 경로에서 `pause >nul`을 보장하여 사용자가 키를 누르기 전에 창이 꺼지지 않음 입증.
+  3. `scripts/launcher.py`에 `--no-pause` 인자 지원 및 기실행 중인 서버 감지 시 안내 출력.
+  4. 프런트엔드(`static/app.js`)에서 캡처 시작 응답 성공(`start_response`) 또는 첫 바이너리 프레임 수신 전까지 `btnStart` 노출 차단(핸드셰이크 선행 원칙).
+  5. 웹소켓 세션 도중 예기치 않은 단절 발생 시 즉시 중단되지 않고 HTTP 스트림 프로토콜로 무중단 자동 복구.
+  6. 서버 측 `websocket_stream_endpoint` 액션별 예외 처리 격리로 웹소켓 세션 보호.
+  7. `docs/QUALITY_POSTMORTEM.md` 및 `LESSONS.md`에 근본 원인 분석, 5대 안티 결함 불변식, 릴리즈 전 필수 스모크 체크리스트 기록.
+  8. 신규 실제 프로세스 스모크 테스트 포함 전체 178개 테스트 100% PASS 및 무회귀 입증.
+  9. WBS 게이트 유효성 검사기(`python scripts/wbs_gate_validator.py`) 100% 통과.
+* **감사 판정**: `[PASS]`
+* **롤백 전략**: `git checkout HEAD~1`
+
+
 
 
 

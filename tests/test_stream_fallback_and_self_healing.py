@@ -487,3 +487,26 @@ def test_stop_ops_clears_socket_handlers_and_restores_button_text():
     assert res.returncode == 0, f"Node.js stopOps test failed: {res.stderr}"
     assert "STOP_OPS_NODE_OK" in res.stdout
 
+
+def test_batch_launcher_executes_without_syntax_error():
+    """Verify 실행하기.bat executes in cmd.exe without syntax error (e.g., 'was unexpected at this time')."""
+    if sys.platform != "win32":
+        pytest.skip("Windows batch execution requires Windows")
+
+    cmd = ["cmd.exe", "/c", str(LAUNCH_BAT), "--no-pause", "--help"]
+    res = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=15)
+    assert res.returncode == 0, f"실행하기.bat failed: {res.stderr} / {res.stdout}"
+    assert "was unexpected at this time" not in res.stderr
+    assert "was unexpected at this time" not in res.stdout
+    assert "누락 was unexpected" not in res.stdout
+
+
+def test_app_js_wgc_button_display_invariants():
+    """Verify app.js does not prematurely show btnStart until start_response succeeds or frames arrive."""
+    content = APP_JS.read_text(encoding="utf-8")
+    # Verify auto-recovery to HTTP stream on unexpected WS disconnect
+    assert "startHttpFallbackCapture" in content
+    assert "WebSocket 스트림 연결 끊김" in content
+    # Verify btnStart is displayed in start_response or binary frame
+    assert "$('btnStart').classList.remove('hidden')" in content
+

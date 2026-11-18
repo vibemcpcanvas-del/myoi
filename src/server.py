@@ -794,12 +794,26 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                     await websocket.send_json({"type": "windows", "data": windows})
                 elif action == "start":
                     target = payload.get("target") or payload.get("hwnd") or 0
-                    fps = int(payload.get("fps") or 20)
-                    quality = int(payload.get("quality") or 80)
-                    res = capture_svc.start_capture(target=target, fps=fps, quality=quality)
+                    try:
+                        fps = int(payload.get("fps") or 20)
+                    except (ValueError, TypeError):
+                        fps = 20
+                    try:
+                        quality = int(payload.get("quality") or 80)
+                    except (ValueError, TypeError):
+                        quality = 80
+                    try:
+                        res = capture_svc.start_capture(target=target, fps=fps, quality=quality)
+                    except Exception as exc:
+                        logger.warning(f"Failed to start capture: {exc}")
+                        res = {"success": False, "error": "capture_start_error", "message": str(exc)}
                     await websocket.send_json({"type": "start_response", "data": res})
                 elif action == "stop":
-                    res = capture_svc.stop_capture()
+                    try:
+                        res = capture_svc.stop_capture()
+                    except Exception as exc:
+                        logger.warning(f"Failed to stop capture: {exc}")
+                        res = {"success": False, "error": "capture_stop_error", "message": str(exc)}
                     await websocket.send_json({"type": "stop_response", "data": res})
                 elif action == "status":
                     status_data = capture_svc.get_status()
@@ -808,6 +822,12 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                     await websocket.send_json({"type": "pong", "time": time.time()})
             except json.JSONDecodeError:
                 await websocket.send_json({"type": "error", "message": "Invalid JSON payload."})
+            except Exception as e:
+                logger.error(f"Unhandled error in websocket message handler: {e}")
+                try:
+                    await websocket.send_json({"type": "error", "message": f"Server processing error: {e}"})
+                except Exception:
+                    break
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     finally:
