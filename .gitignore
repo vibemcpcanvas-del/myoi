@@ -59,3 +59,5 @@ venv.bak/
 logs/
 *.log
 .server.pid
+data/sessions/*
+!data/sessions/.gitkeep

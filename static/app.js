@@ -16,6 +16,7 @@
         $('toastBox').appendChild(d);
         setTimeout(() => d.remove(), 3500);
     };
+    window.toast = toast;
 
     const COLORS = ["#eab308", "#ef4444", "#3b82f6", "#a855f7", "#22c55e", "#f97316", "#06b6d4", "#ec4899"];
     const NET_SIZE = 640;
@@ -267,8 +268,14 @@
     };
 
     $('btnNewSession').onclick = async () => {
-        if (window.Reviewer && window.Reviewer.records.length > 0) {
-            await window.Reviewer.saveCurrentSessionToServer(true);
+        if (window.Reviewer) {
+            if (window.Reviewer.autoSaveTimer) {
+                clearTimeout(window.Reviewer.autoSaveTimer);
+                window.Reviewer.autoSaveTimer = null;
+            }
+            if (window.Reviewer.records.length > 0) {
+                await window.Reviewer.saveCurrentSessionToServer(true);
+            }
         }
         state.sessionId = generateSessionId();
         if (window.Reviewer) {
@@ -909,13 +916,16 @@
             // Build payload for server-side exporter
             const imagesMap = {};
             approved.forEach(r => {
-                imagesMap[r.imageFile] = r.origBase64;
+                if (r.origBase64) {
+                    imagesMap[r.imageFile] = r.origBase64;
+                }
             });
 
             const res = await fetch("/api/export-yolo", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
+                    sessionId: (window.Reviewer && window.Reviewer.currentSessionId) || state.sessionId,
                     records: approved,
                     images: imagesMap,
                     classes: state.cls,

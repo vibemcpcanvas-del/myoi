@@ -407,32 +407,38 @@ async def export_yolo_zip(request: Request):
 
     # Decode base64 images
     image_data_map: Dict[str, bytes] = {}
-    for fname, b64_str in images_b64.items():
-        if "," in b64_str:
-            b64_str = b64_str.split(",", 1)[1]
-        try:
-            raw_bytes = base64.b64decode(b64_str)
-            if not raw_bytes or len(raw_bytes) == 0:
-                raise ValueError("Image base64 decoded to 0 bytes.")
-            image_data_map[fname] = raw_bytes
-            image_data_map[Path(fname).name] = raw_bytes
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"error": "invalid_image_base64", "message": f"Failed to decode image '{fname}': {e}"},
-            )
+    if isinstance(images_b64, dict):
+        for fname, b64_str in images_b64.items():
+            if b64_str is None:
+                continue
+            if not isinstance(b64_str, str):
+                continue
+            if "," in b64_str:
+                b64_str = b64_str.split(",", 1)[1]
+            try:
+                raw_bytes = base64.b64decode(b64_str)
+                if not raw_bytes or len(raw_bytes) == 0:
+                    raise ValueError("Image base64 decoded to 0 bytes.")
+                image_data_map[fname] = raw_bytes
+                image_data_map[Path(fname).name] = raw_bytes
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error": "invalid_image_base64", "message": f"Failed to decode image '{fname}': {e}"},
+                )
 
     # Automatic disk fallback: for any approved records whose images were omitted from payload,
     # attempt resolution from persisted sessions on disk
     cfg = get_config()
     mgr = get_session_manager(base_dir=cfg.data_dir)
+    top_sess_id = body.get("sessionId")
     for rec in records:
         if rec.get("reviewStatus") == "approved":
             img_file = rec.get("imageFile", "")
-            img_name = Path(img_file).name
-            if img_file not in image_data_map and img_name not in image_data_map:
-                sess_id = rec.get("sessionId")
-                if sess_id:
+            img_name = Path(img_file).name if img_file else ""
+            if (not img_file or img_file not in image_data_map) and (not img_name or img_name not in image_data_map):
+                sess_id = rec.get("sessionId") or top_sess_id
+                if sess_id and img_file:
                     try:
                         disk_path = mgr.get_image_file_path(sess_id, img_file)
                         if disk_path and disk_path.exists() and disk_path.stat().st_size > 0:

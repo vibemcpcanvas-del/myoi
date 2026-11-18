@@ -2,10 +2,12 @@
 Session Persistence and Historical Data Retrieval Manager for SCHALE Review Center.
 Enforces P0 safety, fail-closed gates, input sanitization, and data integrity invariants:
 - Strict path traversal prevention (rejects '..', slashes, control chars, null bytes)
+- Safe image path handling (only allows approved image extensions, restricts file resolution)
 - Image payload validation (rejects 0-byte or corrupted image data)
 - Bounding box boundary & coordinate invariants (numeric finite, containment within original dimensions)
+- Strict non-boolean integer and float coordinate checks
 - Non-negative integer class ID validation
-- Atomic session writing to avoid half-written state on crash
+- Thread-safe atomic session writing with unique temp files to prevent Windows file locking races
 """
 
 from __future__ import annotations
@@ -18,12 +20,15 @@ import os
 from pathlib import Path
 import re
 import shutil
+import threading
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 
 SESSION_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]+$")
 RECORD_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]+$")
 MAX_SESSION_ID_LEN = 128
 MAX_IMAGE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 def validate_session_id(session_id: str, base_dir: Path) -> Path:
@@ -65,6 +70,31 @@ def validate_session_id(session_id: str, base_dir: Path) -> Path:
         )
 
     return target_dir
+
+
+def sanitize_relative_path(path_str: str, allowed_extensions: Optional[set[str]] = None) -> str:
+    """Sanitizes and validates a relative path against path traversal attacks."""
+    if not isinstance(path_str, str) or not path_str.strip():
+        raise ValueError("Relative file path must be a non-empty string.")
+
+    clean_str = path_str.replace("\\", "/").strip().lstrip("/")
+    if not clean_str:
+        raise ValueError("Relative file path cannot be empty or root.")
+
+    if "\x00" in clean_str or ".." in clean_str:
+        raise ValueError(f"Path traversal attempt detected in path: '{path_str}'")
+
+    if clean_str.startswith("/") or (len(clean_str) >= 2 and clean_str[1] == ":"):
+        raise ValueError(f"Absolute path not permitted: '{path_str}'")
+
+    if allowed_extensions:
+        ext = Path(clean_str).suffix.lower()
+        if ext not in allowed_extensions:
+            raise ValueError(
+                f"File extension '{ext}' in '{path_str}' is not in allowed extensions: {sorted(list(allowed_extensions))}"
+            )
+
+    return clean_str
 
 
 def validate_image_payload(image_bytes: bytes, filename: str = "image.jpg") -> None:
@@ -128,8 +158,24 @@ def validate_record_invariants(record: Dict[str, Any]) -> None:
 
     orig_w = record.get("originalWidth")
     orig_h = record.get("originalHeight")
-    if not isinstance(orig_w, int) or not isinstance(orig_h, int) or orig_w <= 0 or orig_h <= 0:
+    if (
+        isinstance(orig_w, bool)
+        or isinstance(orig_h, bool)
+        or not isinstance(orig_w, int)
+        or not isinstance(orig_h, int)
+        or orig_w <= 0
+        or orig_h <= 0
+    ):
         raise ValueError(f"Record '{record_id}' has invalid dimensions: ({orig_w}x{orig_h})")
+
+    # Validate imageFile / previewFile if provided
+    img_file = record.get("imageFile")
+    if img_file is not None:
+        sanitize_relative_path(img_file, allowed_extensions=ALLOWED_IMAGE_EXTENSIONS)
+
+    prev_file = record.get("previewFile")
+    if prev_file is not None:
+        sanitize_relative_path(prev_file, allowed_extensions=ALLOWED_IMAGE_EXTENSIONS)
 
     # Validate annotations
     annotations = record.get("reviewedAnnotations")
@@ -156,7 +202,7 @@ def validate_record_invariants(record: Dict[str, Any]) -> None:
 
         for coord_name in ("x1", "y1", "x2", "y2"):
             val = box.get(coord_name)
-            if not isinstance(val, (int, float)) or not math.isfinite(val):
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val):
                 raise ValueError(
                     f"Record '{record_id}' annotation [{idx}] coordinate '{coord_name}' is not a finite number: {val}"
                 )
@@ -189,6 +235,7 @@ class SessionManager:
             self.base_dir = Path(base_dir).resolve()
 
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
 
     def get_session_dir(self, session_id: str) -> Path:
         """Returns validated session directory path."""
@@ -201,181 +248,209 @@ class SessionManager:
         classes: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Atomically saves session metadata, annotations, and images to disk."""
-        sess_dir = self.get_session_dir(session_id)
-        images_dir = sess_dir / "images"
-        previews_dir = sess_dir / "previews"
-        images_dir.mkdir(parents=True, exist_ok=True)
-        previews_dir.mkdir(parents=True, exist_ok=True)
+        """Atomically saves session metadata, annotations, and images to disk with thread-safe lock."""
+        with self._lock:
+            sess_dir = self.get_session_dir(session_id)
+            images_dir = sess_dir / "images"
+            previews_dir = sess_dir / "previews"
+            images_dir.mkdir(parents=True, exist_ok=True)
+            previews_dir.mkdir(parents=True, exist_ok=True)
 
-        if not isinstance(records, list):
-            raise ValueError("Records must be a list of frame snapshot objects.")
+            if not isinstance(records, list):
+                raise ValueError("Records must be a list of frame snapshot objects.")
 
-        cleaned_records: List[Dict[str, Any]] = []
-        status_counts = {"all": len(records), "pending": 0, "approved": 0, "rejected": 0}
+            cleaned_records: List[Dict[str, Any]] = []
+            status_counts = {"all": len(records), "pending": 0, "approved": 0, "rejected": 0}
 
-        for rec in records:
-            validate_record_invariants(rec)
-            rec_id = rec["recordId"]
+            for rec in records:
+                validate_record_invariants(rec)
+                rec_id = rec["recordId"]
 
-            # Save clean original image
-            orig_filename = f"{rec_id}_orig.jpg"
-            orig_dest = images_dir / orig_filename
-            has_orig_on_disk = orig_dest.exists() and orig_dest.stat().st_size > 0
+                # Save clean original image
+                orig_filename = f"{rec_id}_orig.jpg"
+                orig_dest = images_dir / orig_filename
+                has_orig_on_disk = orig_dest.exists() and orig_dest.stat().st_size > 0
 
-            orig_b64 = rec.get("origBase64")
-            if orig_b64:
-                img_bytes = decode_image_base64(orig_b64, orig_filename)
-                orig_dest.write_bytes(img_bytes)
-                has_orig_on_disk = True
-            elif not has_orig_on_disk:
-                # Check if referenced imageFile exists elsewhere in session dir
-                ref_file = rec.get("imageFile")
-                if ref_file:
-                    alt_path = sess_dir / ref_file
-                    if alt_path.exists() and alt_path.stat().st_size > 0:
+                orig_b64 = rec.get("origBase64")
+                if orig_b64:
+                    if not has_orig_on_disk:
+                        img_bytes = decode_image_base64(orig_b64, orig_filename)
+                        orig_dest.write_bytes(img_bytes)
                         has_orig_on_disk = True
-                        if alt_path != orig_dest:
-                            shutil.copy2(alt_path, orig_dest)
+                elif not has_orig_on_disk:
+                    # Check if referenced imageFile exists elsewhere in session dir
+                    ref_file = rec.get("imageFile")
+                    if ref_file:
+                        safe_ref = sanitize_relative_path(ref_file, allowed_extensions=ALLOWED_IMAGE_EXTENSIONS)
+                        alt_path = (sess_dir / safe_ref).resolve()
+                        if sess_dir.resolve() not in alt_path.parents:
+                            raise ValueError(f"Path traversal detected in imageFile: '{ref_file}'")
+                        if alt_path.exists() and alt_path.stat().st_size > 0:
+                            has_orig_on_disk = True
+                            if alt_path != orig_dest:
+                                shutil.copy2(alt_path, orig_dest)
 
-            if not has_orig_on_disk:
-                raise ValueError(
-                    f"Record '{rec_id}' has neither 'origBase64' image payload nor existing image on disk."
-                )
+                if not has_orig_on_disk:
+                    raise ValueError(
+                        f"Record '{rec_id}' has neither 'origBase64' image payload nor existing image on disk."
+                    )
 
-            # Save preview image if provided
-            prev_filename = f"{rec_id}_prev.jpg"
-            prev_dest = previews_dir / prev_filename
-            prev_b64 = rec.get("prevBase64")
-            if prev_b64:
+                # Save preview image if provided
+                prev_filename = f"{rec_id}_prev.jpg"
+                prev_dest = previews_dir / prev_filename
+                prev_b64 = rec.get("prevBase64")
+                if prev_b64 and not (prev_dest.exists() and prev_dest.stat().st_size > 0):
+                    try:
+                        prev_bytes = decode_image_base64(prev_b64, prev_filename)
+                        prev_dest.write_bytes(prev_bytes)
+                    except Exception:
+                        pass
+
+                # Update status counts
+                rev_status = rec.get("reviewStatus", "pending")
+                if rev_status in status_counts:
+                    status_counts[rev_status] += 1
+                else:
+                    status_counts["pending"] += 1
+
+                # Prepare disk record without massive base64 strings
+                rec_copy = dict(rec)
+                rec_copy.pop("origBase64", None)
+                rec_copy.pop("prevBase64", None)
+                rec_copy.pop("origBlob", None)
+                rec_copy.pop("prevBlob", None)
+                rec_copy.pop("_savedOnServer", None)
+                rec_copy["imageFile"] = f"images/{orig_filename}"
+                if prev_dest.exists() and prev_dest.stat().st_size > 0:
+                    rec_copy["previewFile"] = f"previews/{prev_filename}"
+
+                cleaned_records.append(rec_copy)
+
+            # Preserve creation timestamp if existing session.json exists
+            session_json_path = sess_dir / "session.json"
+            now_iso = datetime.now(timezone.utc).isoformat()
+            created_at_utc = now_iso
+
+            if session_json_path.exists():
                 try:
-                    prev_bytes = decode_image_base64(prev_b64, prev_filename)
-                    prev_dest.write_bytes(prev_bytes)
+                    old_data = json.loads(session_json_path.read_text(encoding="utf-8"))
+                    if "createdAtUtc" in old_data:
+                        created_at_utc = old_data["createdAtUtc"]
                 except Exception:
                     pass
 
-            # Update status counts
-            rev_status = rec.get("reviewStatus", "pending")
-            if rev_status in status_counts:
-                status_counts[rev_status] += 1
-            else:
-                status_counts["pending"] += 1
+            session_payload = {
+                "schemaVersion": "1.0.0",
+                "sessionId": session_id,
+                "createdAtUtc": created_at_utc,
+                "updatedAtUtc": now_iso,
+                "recordCount": len(cleaned_records),
+                "statusCounts": status_counts,
+                "classes": classes or {},
+                "metadata": metadata or {},
+                "records": cleaned_records,
+            }
 
-            # Prepare disk record without massive base64 strings
-            rec_copy = dict(rec)
-            rec_copy.pop("origBase64", None)
-            rec_copy.pop("prevBase64", None)
-            rec_copy.pop("origBlob", None)
-            rec_copy.pop("prevBlob", None)
-            rec_copy["imageFile"] = f"images/{orig_filename}"
-            if prev_dest.exists():
-                rec_copy["previewFile"] = f"previews/{prev_filename}"
-
-            cleaned_records.append(rec_copy)
-
-        # Preserve creation timestamp if existing session.json exists
-        session_json_path = sess_dir / "session.json"
-        now_iso = datetime.now(timezone.utc).isoformat()
-        created_at_utc = now_iso
-
-        if session_json_path.exists():
+            # Atomic file write with unique per-thread temp file to prevent Windows PermissionError races
+            temp_json_path = sess_dir / f"session.json.{uuid.uuid4().hex}.tmp"
             try:
-                old_data = json.loads(session_json_path.read_text(encoding="utf-8"))
-                if "createdAtUtc" in old_data:
-                    created_at_utc = old_data["createdAtUtc"]
-            except Exception:
-                pass
+                temp_json_path.write_text(json.dumps(session_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+                temp_json_path.replace(session_json_path)
+            finally:
+                if temp_json_path.exists():
+                    try:
+                        temp_json_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
 
-        session_payload = {
-            "schemaVersion": "1.0.0",
-            "sessionId": session_id,
-            "createdAtUtc": created_at_utc,
-            "updatedAtUtc": now_iso,
-            "recordCount": len(cleaned_records),
-            "statusCounts": status_counts,
-            "classes": classes or {},
-            "metadata": metadata or {},
-            "records": cleaned_records,
-        }
-
-        # Atomic file write
-        temp_json_path = sess_dir / "session.json.tmp"
-        temp_json_path.write_text(json.dumps(session_payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        temp_json_path.replace(session_json_path)
-
-        return {
-            "success": True,
-            "sessionId": session_id,
-            "recordCount": len(cleaned_records),
-            "statusCounts": status_counts,
-            "createdAtUtc": created_at_utc,
-            "updatedAtUtc": now_iso,
-            "message": f"Session '{session_id}' saved successfully with {len(cleaned_records)} records.",
-        }
+            return {
+                "success": True,
+                "sessionId": session_id,
+                "recordCount": len(cleaned_records),
+                "statusCounts": status_counts,
+                "createdAtUtc": created_at_utc,
+                "updatedAtUtc": now_iso,
+                "message": f"Session '{session_id}' saved successfully with {len(cleaned_records)} records.",
+            }
 
     def load_session(self, session_id: str, include_base64: bool = True) -> Dict[str, Any]:
         """Loads historical session from disk and populates base64 image data URLs."""
-        sess_dir = self.get_session_dir(session_id)
-        session_json_path = sess_dir / "session.json"
+        with self._lock:
+            sess_dir = self.get_session_dir(session_id)
+            session_json_path = sess_dir / "session.json"
 
-        if not session_json_path.exists():
-            raise FileNotFoundError(f"Session '{session_id}' does not exist on disk.")
+            if not session_json_path.exists():
+                raise FileNotFoundError(f"Session '{session_id}' does not exist on disk.")
 
-        try:
-            session_data = json.loads(session_json_path.read_text(encoding="utf-8"))
-        except Exception as e:
-            raise ValueError(f"Corrupted session.json file in '{session_id}': {e}")
+            try:
+                session_data = json.loads(session_json_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                raise ValueError(f"Corrupted session.json file in '{session_id}': {e}")
 
-        records = session_data.get("records", [])
+            records = session_data.get("records", [])
 
-        if include_base64:
-            for rec in records:
-                rec_id = rec.get("recordId")
-                img_rel = rec.get("imageFile", f"images/{rec_id}_orig.jpg")
-                img_path = sess_dir / img_rel
-                if not img_path.exists():
-                    img_path = sess_dir / "images" / f"{rec_id}_orig.jpg"
+            if include_base64:
+                for rec in records:
+                    rec_id = rec.get("recordId")
+                    img_rel = rec.get("imageFile", f"images/{rec_id}_orig.jpg")
+                    try:
+                        img_path = self.get_image_file_path(session_id, img_rel)
+                    except ValueError:
+                        img_path = None
 
-                if img_path.exists() and img_path.stat().st_size > 0:
-                    raw_bytes = img_path.read_bytes()
-                    mime_type = "image/jpeg"
-                    if raw_bytes.startswith(b"\x89PNG"):
-                        mime_type = "image/png"
-                    elif raw_bytes.startswith(b"RIFF"):
-                        mime_type = "image/webp"
+                    if not img_path:
+                        try:
+                            img_path = self.get_image_file_path(session_id, f"images/{rec_id}_orig.jpg")
+                        except ValueError:
+                            img_path = None
 
-                    b64_str = base64.b64encode(raw_bytes).decode("ascii")
-                    rec["origBase64"] = f"data:{mime_type};base64,{b64_str}"
+                    if img_path and img_path.exists() and img_path.stat().st_size > 0:
+                        raw_bytes = img_path.read_bytes()
+                        mime_type = "image/jpeg"
+                        if raw_bytes.startswith(b"\x89PNG"):
+                            mime_type = "image/png"
+                        elif raw_bytes.startswith(b"RIFF"):
+                            mime_type = "image/webp"
 
-                # Preview image
-                prev_rel = rec.get("previewFile", f"previews/{rec_id}_prev.jpg")
-                prev_path = sess_dir / prev_rel
-                if not prev_path.exists():
-                    prev_path = sess_dir / "previews" / f"{rec_id}_prev.jpg"
+                        b64_str = base64.b64encode(raw_bytes).decode("ascii")
+                        rec["origBase64"] = f"data:{mime_type};base64,{b64_str}"
 
-                if prev_path.exists() and prev_path.stat().st_size > 0:
-                    p_bytes = prev_path.read_bytes()
-                    p_b64 = base64.b64encode(p_bytes).decode("ascii")
-                    rec["prevBase64"] = f"data:image/jpeg;base64,{p_b64}"
-                elif "origBase64" in rec:
-                    rec["prevBase64"] = rec["origBase64"]
+                    # Preview image
+                    prev_rel = rec.get("previewFile", f"previews/{rec_id}_prev.jpg")
+                    try:
+                        prev_path = self.get_image_file_path(session_id, prev_rel)
+                    except ValueError:
+                        prev_path = None
 
-        return {
-            "success": True,
-            "sessionId": session_data.get("sessionId", session_id),
-            "createdAtUtc": session_data.get("createdAtUtc"),
-            "updatedAtUtc": session_data.get("updatedAtUtc"),
-            "recordCount": len(records),
-            "statusCounts": session_data.get("statusCounts", {
-                "all": len(records),
-                "pending": sum(1 for r in records if r.get("reviewStatus") == "pending"),
-                "approved": sum(1 for r in records if r.get("reviewStatus") == "approved"),
-                "rejected": sum(1 for r in records if r.get("reviewStatus") == "rejected"),
-            }),
-            "classes": session_data.get("classes", {}),
-            "metadata": session_data.get("metadata", {}),
-            "records": records,
-        }
+                    if not prev_path:
+                        try:
+                            prev_path = self.get_image_file_path(session_id, f"previews/{rec_id}_prev.jpg")
+                        except ValueError:
+                            prev_path = None
+
+                    if prev_path and prev_path.exists() and prev_path.stat().st_size > 0:
+                        p_bytes = prev_path.read_bytes()
+                        p_b64 = base64.b64encode(p_bytes).decode("ascii")
+                        rec["prevBase64"] = f"data:image/jpeg;base64,{p_b64}"
+                    elif "origBase64" in rec:
+                        rec["prevBase64"] = rec["origBase64"]
+
+            return {
+                "success": True,
+                "sessionId": session_data.get("sessionId", session_id),
+                "createdAtUtc": session_data.get("createdAtUtc"),
+                "updatedAtUtc": session_data.get("updatedAtUtc"),
+                "recordCount": len(records),
+                "statusCounts": session_data.get("statusCounts", {
+                    "all": len(records),
+                    "pending": sum(1 for r in records if r.get("reviewStatus") == "pending"),
+                    "approved": sum(1 for r in records if r.get("reviewStatus") == "approved"),
+                    "rejected": sum(1 for r in records if r.get("reviewStatus") == "rejected"),
+                }),
+                "classes": session_data.get("classes", {}),
+                "metadata": session_data.get("metadata", {}),
+                "records": records,
+            }
 
     def list_sessions(self) -> List[Dict[str, Any]]:
         """Discovers and summarizes all historical sessions available on disk."""
@@ -424,7 +499,7 @@ class SessionManager:
             # Fallback for unindexed folder with images
             images_dir = entry / "images"
             if images_dir.exists() and images_dir.is_dir():
-                img_files = [f for f in images_dir.glob("*_orig.*") if f.is_file()]
+                img_files = [f for f in images_dir.glob("*_orig.*") if f.is_file() and f.suffix.lower() in ALLOWED_IMAGE_EXTENSIONS]
                 if img_files:
                     mtime_iso = datetime.fromtimestamp(entry.stat().st_mtime, tz=timezone.utc).isoformat()
                     results.append({
@@ -450,25 +525,24 @@ class SessionManager:
 
     def delete_session(self, session_id: str) -> bool:
         """Permanently removes a session directory from disk."""
-        sess_dir = self.get_session_dir(session_id)
-        if not sess_dir.exists():
-            raise FileNotFoundError(f"Session '{session_id}' not found.")
+        with self._lock:
+            sess_dir = self.get_session_dir(session_id)
+            if not sess_dir.exists():
+                raise FileNotFoundError(f"Session '{session_id}' not found.")
 
-        shutil.rmtree(sess_dir)
-        return True
+            shutil.rmtree(sess_dir)
+            return True
 
     def get_image_file_path(self, session_id: str, filename_or_rel_path: str) -> Optional[Path]:
-        """Resolves an image file path within a session with strict path containment."""
+        """Resolves an image file path within a session with strict path containment and image extension check."""
         sess_dir = self.get_session_dir(session_id)
         if not sess_dir.exists():
             return None
 
-        # Sanitize filename / path
-        rel_clean = filename_or_rel_path.replace("\\", "/").strip().lstrip("/")
-        if ".." in rel_clean or "\x00" in rel_clean:
-            raise ValueError(f"Path traversal detected in image filename: '{filename_or_rel_path}'")
+        # Sanitize and validate filename / relative path
+        safe_rel = sanitize_relative_path(filename_or_rel_path, allowed_extensions=ALLOWED_IMAGE_EXTENSIONS)
 
-        target_file = (sess_dir / rel_clean).resolve()
+        target_file = (sess_dir / safe_rel).resolve()
         if sess_dir.resolve() not in target_file.parents:
             raise ValueError(f"Path traversal detected in image path: '{filename_or_rel_path}'")
 
@@ -476,10 +550,15 @@ class SessionManager:
             return target_file
 
         # Fallback to direct name under images/
-        name_only = Path(rel_clean).name
+        name_only = Path(safe_rel).name
         target_in_images = (sess_dir / "images" / name_only).resolve()
-        if target_in_images.exists() and target_in_images.is_file():
+        if sess_dir.resolve() in target_in_images.parents and target_in_images.exists() and target_in_images.is_file():
             return target_in_images
+
+        # Fallback to direct name under previews/
+        target_in_previews = (sess_dir / "previews" / name_only).resolve()
+        if sess_dir.resolve() in target_in_previews.parents and target_in_previews.exists() and target_in_previews.is_file():
+            return target_in_previews
 
         return None
 

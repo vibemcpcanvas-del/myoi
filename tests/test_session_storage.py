@@ -677,3 +677,181 @@ def test_api_yolo_export_resolves_image_from_disk_fallback(test_client: TestClie
     assert export_resp.status_code == 200
     assert export_resp.headers["content-type"] == "application/zip"
     assert len(export_resp.content) > 1000
+
+
+# ============================================================================
+# 4. Strict Security, Concurrency, and Invariant Attack Vectors
+# ============================================================================
+
+def test_validate_record_invariants_rejects_boolean_dimensions_and_coords():
+    """Booleans must not be accepted as integers or floats for dimensions and coordinates."""
+    # Boolean width
+    with pytest.raises(ValueError) as exc1:
+        validate_record_invariants({
+            "recordId": "rec_b1",
+            "originalWidth": True,
+            "originalHeight": 480,
+            "reviewedAnnotations": [],
+        })
+    assert "invalid dimensions" in str(exc1.value)
+
+    # Boolean coordinate
+    with pytest.raises(ValueError) as exc2:
+        validate_record_invariants({
+            "recordId": "rec_b2",
+            "originalWidth": 640,
+            "originalHeight": 480,
+            "reviewedAnnotations": [
+                {"classId": 0, "box": {"x1": True, "y1": 10, "x2": 50, "y2": 50}}
+            ],
+        })
+    assert "not a finite number" in str(exc2.value)
+
+
+def test_save_session_rejects_path_traversal_image_file(temp_session_mgr: SessionManager, tmp_path: Path):
+    """save_session strictly rejects path traversal or escaping file references in imageFile."""
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_text("CONFIDENTIAL_SENSEI_DATA", encoding="utf-8")
+
+    session_id = "SES_TRAV_ATTACK"
+    sess_dir = temp_session_mgr.get_session_dir(session_id)
+    sess_dir.mkdir(parents=True, exist_ok=True)
+
+    # Attempt path traversal via imageFile
+    bad_record = {
+        "recordId": "rec_trav_1",
+        "sessionId": session_id,
+        "originalWidth": 640,
+        "originalHeight": 480,
+        "imageFile": "../secret.txt",
+        "reviewedAnnotations": [],
+    }
+
+    with pytest.raises(ValueError) as exc:
+        temp_session_mgr.save_session(session_id, [bad_record])
+    assert "Path traversal" in str(exc.value)
+
+    # Ensure secret was NOT copied to images dir
+    assert not (sess_dir / "images" / "rec_trav_1_orig.jpg").exists()
+
+
+def test_load_session_path_traversal_containment(temp_session_mgr: SessionManager, tmp_path: Path):
+    """load_session strictly refuses to read or leak files outside session directory."""
+    secret_file = tmp_path / "outside_secret.key"
+    secret_file.write_text("HIGHLY_SECRET_KEY", encoding="utf-8")
+
+    session_id = "SES_LOAD_TRAV"
+    sess_dir = temp_session_mgr.get_session_dir(session_id)
+    sess_dir.mkdir(parents=True, exist_ok=True)
+
+    # Manually craft session.json pointing to outside file
+    crafted_json = {
+        "sessionId": session_id,
+        "records": [
+            {
+                "recordId": "rec_leak",
+                "imageFile": "../outside_secret.key",
+            }
+        ],
+    }
+    (sess_dir / "session.json").write_text(json.dumps(crafted_json), encoding="utf-8")
+
+    loaded = temp_session_mgr.load_session(session_id, include_base64=True)
+    rec = loaded["records"][0]
+    # origBase64 must NOT be populated from outside file!
+    assert "origBase64" not in rec
+
+
+def test_api_serve_session_image_rejects_non_image_files(test_client: TestClient, sample_jpeg_b64):
+    """GET /api/sessions/{session_id}/images/{filename} rejects non-image files such as session.json."""
+    session_id = "SES_SECURITY_EXT_TEST"
+    save_payload = {
+        "sessionId": session_id,
+        "records": [
+            {
+                "recordId": "rec_sec_1",
+                "sessionId": session_id,
+                "originalWidth": 640,
+                "originalHeight": 480,
+                "reviewStatus": "pending",
+                "origBase64": sample_jpeg_b64,
+                "reviewedAnnotations": [],
+            }
+        ],
+    }
+    test_client.post("/api/sessions/save", json=save_payload)
+
+    # Attempt to fetch session.json via images endpoint
+    resp = test_client.get(f"/api/sessions/{session_id}/images/session.json")
+    # Must be rejected (400 or 404), never 200 OK!
+    assert resp.status_code in (400, 404)
+
+
+def test_api_yolo_export_tolerates_none_base64_in_images_map(test_client: TestClient, sample_jpeg_b64):
+    """POST /api/export-yolo handles images map with None values without crashing (disk fallback)."""
+    session_id = "SES_EXPORT_TOLERANCE"
+    records = [
+        {
+            "recordId": "rec_tol_1",
+            "sessionId": session_id,
+            "originalWidth": 640,
+            "originalHeight": 480,
+            "reviewStatus": "approved",
+            "origBase64": sample_jpeg_b64,
+            "reviewedAnnotations": [
+                {"classId": 0, "className": "Sensei", "confidence": 0.95, "box": {"x1": 50, "y1": 50, "x2": 200, "y2": 200}}
+            ],
+        }
+    ]
+
+    test_client.post("/api/sessions/save", json={"sessionId": session_id, "records": records})
+    loaded = test_client.get(f"/api/sessions/{session_id}").json()
+    approved_recs = loaded["records"]
+
+    # Send payload where images map contains None (e.g. from JSON serialization of undefined)
+    export_payload = {
+        "sessionId": session_id,
+        "records": approved_recs,
+        "images": {
+            "images/rec_tol_1_orig.jpg": None,
+        },
+        "classes": {"0": {"name": "Sensei", "on": True, "alt": True, "cnf": 0.5}},
+    }
+
+    resp = test_client.post("/api/export-yolo", json=export_payload)
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+    assert len(resp.content) > 1000
+
+
+def test_session_manager_concurrent_saves_no_permission_error(temp_session_mgr: SessionManager, sample_jpeg_b64):
+    """Thread-safe locking and unique temp files prevent Windows PermissionError on concurrent saves."""
+    import concurrent.futures
+
+    session_id = "SES_CONCURRENT_THREAD_TEST"
+    record = {
+        "recordId": "rec_conc_1",
+        "sessionId": session_id,
+        "originalWidth": 640,
+        "originalHeight": 480,
+        "reviewStatus": "pending",
+        "origBase64": sample_jpeg_b64,
+        "reviewedAnnotations": [],
+    }
+
+    # First initial save to create images on disk
+    temp_session_mgr.save_session(session_id, [record])
+
+    def worker_save(idx):
+        rec_copy = dict(record)
+        rec_copy["reviewStatus"] = "approved" if idx % 2 == 0 else "pending"
+        return temp_session_mgr.save_session(session_id, [rec_copy])
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(worker_save, i) for i in range(12)]
+        results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+    assert len(results) == 12
+    for r in results:
+        assert r["success"] is True
+

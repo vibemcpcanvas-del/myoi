@@ -335,6 +335,10 @@
         }
 
         clearRecords() {
+            if (this.autoSaveTimer) {
+                clearTimeout(this.autoSaveTimer);
+                this.autoSaveTimer = null;
+            }
             this.records = [];
             this.currentRecordIndex = -1;
             this.selectedBoxIndex = -1;
@@ -483,7 +487,10 @@
             if (!rec) return;
 
             const targetIndex = this.currentRecordIndex;
-            const imgSrc = (this.viewMode === 'prev' && rec.prevBase64) ? rec.prevBase64 : rec.origBase64;
+            let imgSrc = (this.viewMode === 'prev' && rec.prevBase64) ? rec.prevBase64 : rec.origBase64;
+            if (!imgSrc && rec.imageFile && this.currentSessionId) {
+                imgSrc = `/api/sessions/${encodeURIComponent(this.currentSessionId)}/images/${encodeURIComponent(rec.imageFile)}`;
+            }
 
             if (imgSrc === '' || (typeof imgSrc === 'string' && imgSrc.startsWith('data:') && imgSrc.includes(',') && imgSrc.split(',')[1].trim() === '')) {
                 this.handleImageLoadError(targetIndex, '이미지 데이터가 0바이트로 비어 있습니다.');
@@ -1215,6 +1222,7 @@
 
                 // Populate records
                 const recs = data.records || [];
+                recs.forEach(r => { r._savedOnServer = true; });
                 this.records = recs;
                 this.currentRecordIndex = recs.length > 0 ? 0 : -1;
                 this.updateCounts();
@@ -1254,9 +1262,21 @@
             }
 
             try {
+                const payloadRecords = this.records.map(r => {
+                    const copy = Object.assign({}, r);
+                    if (r._savedOnServer && r.imageFile) {
+                        delete copy.origBase64;
+                        delete copy.prevBase64;
+                    }
+                    delete copy.origBlob;
+                    delete copy.prevBlob;
+                    delete copy._savedOnServer;
+                    return copy;
+                });
+
                 const payload = {
                     sessionId: sessId,
-                    records: this.records,
+                    records: payloadRecords,
                     classes: (window.AppState && window.AppState.cls) ? window.AppState.cls : {},
                     metadata: {
                         savedAtUtc: new Date().toISOString(),
@@ -1276,6 +1296,7 @@
                 }
 
                 const resData = await res.json();
+                this.records.forEach(r => { r._savedOnServer = true; });
                 this.currentSessionId = sessId;
                 this.updateSessionBadge();
 

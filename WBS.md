@@ -194,7 +194,7 @@
   4. 이전 세션 선택 시 캔버스 및 라벨 데이터 즉시 로드 및 트리아지 검수/수정 가능.
   5. 세션 데이터 수정 후 서버 영속 저장(`POST /api/sessions/save`) 및 YOLO 데이터셋 ZIP 다운로드 정상 작동.
   6. 스트리밍 스냅샷 수집 시 세션 자동 영속화로 이전 세션 목록에서 즉시 검색 가능.
-  7. 신규 47종 세션 스토리지 테스트 포함 전체 133개 테스트 100% PASS 및 무회귀 입증.
+  7. 신규 53종 세션 스토리지 테스트 포함 전체 139개 테스트 100% PASS 및 무회귀 입증.
   8. WBS 게이트 유효성 검사기(`python scripts/wbs_gate_validator.py`) 100% 통과.
 * **감사 판정**: `[AUDIT_PENDING]`
 * **롤백 전략**: `git checkout HEAD -- src/config.py src/server.py static/ WBS.md; rm src/session_manager.py tests/test_session_storage.py`
