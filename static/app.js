@@ -37,6 +37,10 @@
         // Native WGC Capture Sidecar State
         captureMode: 'wgc', // 'wgc' (default / recommended) or 'webrtc'
         wgcWs: null,
+        httpFallbackActive: false,
+        fallbackTimer: null,
+        wsRetryTimer: null,
+        wsRetryCount: 0,
         wgcReady: false,
         wgcStalled: false,
         lastFrameArrival: 0,
@@ -246,6 +250,42 @@
     $('iConf').oninput = e => $('vConf').innerText = Number(e.target.value).toFixed(2);
     $('iFrame').oninput = e => $('vFrame').innerText = e.target.value;
     $('iCooldown').oninput = e => $('vCooldown').innerText = Number(e.target.value).toFixed(1) + 's';
+    // --- WebSocket Circuit Breaker (Zero-Console-Flood Invariant) ---
+    const wsCircuitBreaker = {
+        state: 'CLOSED', // 'CLOSED', 'OPEN', 'HALF_OPEN'
+        failures: 0,
+        maxFailures: 3,
+        lastFailureTime: 0,
+        resetTimeout: 30000,
+        recordFailure() {
+            this.failures++;
+            this.lastFailureTime = Date.now();
+            if (this.failures >= this.maxFailures) {
+                this.state = 'OPEN';
+            }
+        },
+        recordSuccess() {
+            this.failures = 0;
+            this.state = 'CLOSED';
+        },
+        isOpen() {
+            if (this.state === 'OPEN') {
+                if (Date.now() - this.lastFailureTime > this.resetTimeout) {
+                    this.state = 'HALF_OPEN';
+                    return false;
+                }
+                return true;
+            }
+            return false;
+        },
+        reset() {
+            this.failures = 0;
+            this.state = 'CLOSED';
+            this.lastFailureTime = 0;
+        }
+    };
+    window.wsCircuitBreaker = wsCircuitBreaker;
+
     // --- Stream Concealment (스트리밍 화면 가리기) Bug Fix ---
     // Critical: Do NOT set display: none, visibility: hidden, or opacity: 0 on video/canvas elements!
     // Chromium/WebRTC throttles frame decoding to 0 FPS when elements are hidden or 0 opacity,
@@ -253,7 +293,7 @@
     const updateConcealState = (conceal) => {
         const overlay = $('streamConcealOverlay');
         if (overlay) {
-            const isActive = state.stream || state.wgcWs || state.isRunning;
+            const isActive = state.stream || state.wgcWs || state.httpFallbackActive || state.isRunning;
             overlay.style.display = (conceal && isActive) ? 'flex' : 'none';
         }
         // Ensure underlying video & WGC canvas maintain full hardware decoding composition
@@ -424,7 +464,7 @@
     window.refreshWgcWindows = refreshWgcWindows;
 
     const setCaptureMode = (mode) => {
-        if (state.isRunning || state.stream || state.wgcWs) {
+        if (state.isRunning || state.stream || state.wgcWs || state.httpFallbackActive) {
             stopOps();
         }
         state.captureMode = mode;
@@ -458,118 +498,267 @@
     if ($('tabSourceWebRTC')) $('tabSourceWebRTC').onclick = () => setCaptureMode('webrtc');
     if ($('btnRefreshWindows')) $('btnRefreshWindows').onclick = refreshWgcWindows;
 
+    // --- Native WGC Capture Multi-Protocol Connection & HTTP Fallback ---
+    const startHttpFallbackCapture = async (targetHwnd) => {
+        if (state.httpFallbackActive) return;
+        state.httpFallbackActive = true;
+        $('statusTxt').innerHTML = '<span class="text-blue-500 font-medium">⚡ HTTP 스트림 프로토콜 활성화 중...</span>';
+
+        try {
+            const res = await fetch('/api/capture/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    target: targetHwnd,
+                    fps: 20,
+                    quality: 85
+                })
+            });
+            const data = await res.json();
+            if (!data.success) {
+                toast(`네이티브 캡처 시작 실패: ${data.error || '대상 창을 찾을 수 없습니다.'}`, true);
+                stopOps();
+                return;
+            }
+
+            $('overlayStandby').style.display = 'none';
+            $('btnShare').querySelector('span').innerText = "연결 해제";
+            $('btnStart').classList.remove('hidden');
+            $('vid').classList.add('hidden');
+            $('wgcCanvas').classList.remove('hidden');
+            if (chkHide && chkHide.checked) {
+                updateConcealState(true);
+            }
+            $('statusTxt').innerHTML = '<span class="text-emerald-500 font-bold">⚡ 네이티브 연결됨 (HTTP 스트림 프로토콜)</span>';
+            toast("HTTP 대체 프로토콜로 네이티브 캡처가 연결되었습니다.");
+
+            let pollingInFlight = false;
+            const pollFrame = async () => {
+                if (!state.httpFallbackActive) return;
+                if (pollingInFlight) {
+                    state.fallbackTimer = setTimeout(pollFrame, 25);
+                    return;
+                }
+                pollingInFlight = true;
+                try {
+                    const frameRes = await fetch(`/api/capture/frame?t=${Date.now()}`);
+                    if (frameRes.ok) {
+                        const blob = await frameRes.blob();
+                        const bmp = await createImageBitmap(blob);
+                        const cvs = state.wgcCanvas || $('wgcCanvas');
+                        if (cvs) {
+                            if (cvs.width !== bmp.width || cvs.height !== bmp.height) {
+                                cvs.width = bmp.width;
+                                cvs.height = bmp.height;
+                                $('resolutionInfo').innerText = `해상도: ${bmp.width}x${bmp.height} (HTTP Fallback)`;
+                            }
+                            const ctx = cvs.getContext('2d');
+                            ctx.drawImage(bmp, 0, 0);
+                        }
+                        bmp.close();
+                        state.wgcReady = true;
+                        state.wgcStalled = false;
+                        state.lastFrameArrival = Date.now();
+                    } else if (frameRes.status === 503) {
+                        state.wgcStalled = true;
+                    }
+                } catch (e) {
+                    console.warn("HTTP capture frame polling warning:", e);
+                } finally {
+                    pollingInFlight = false;
+                    if (state.httpFallbackActive) {
+                        state.fallbackTimer = setTimeout(pollFrame, 40); // ~25 FPS
+                    }
+                }
+            };
+            pollFrame();
+        } catch (err) {
+            console.error("HTTP Fallback start error:", err);
+            toast(`HTTP 스트림 연결 실패: ${err.message}`, true);
+            stopOps();
+        }
+    };
+    window.startHttpFallbackCapture = startHttpFallbackCapture;
+
+    const handleWsFailure = (targetHwnd) => {
+        if (state.wgcWs) {
+            try { state.wgcWs.close(); } catch (e) {}
+            state.wgcWs = null;
+        }
+        wsCircuitBreaker.recordFailure();
+        state.wsRetryCount++;
+
+        const maxRetries = wsCircuitBreaker.maxFailures;
+        if (state.wsRetryCount < maxRetries && !wsCircuitBreaker.isOpen()) {
+            const backoff = Math.min(600 * Math.pow(2, state.wsRetryCount - 1), 3000);
+            $('statusTxt').innerHTML = `<span class="text-amber-500 font-medium">⚠️ WebSocket 재연결 대기 중... (${state.wsRetryCount}/${maxRetries}, ${backoff}ms)</span>`;
+            clearTimeout(state.wsRetryTimer);
+            state.wsRetryTimer = setTimeout(() => {
+                if (state.captureMode === 'wgc' && !state.wgcWs && !state.httpFallbackActive) {
+                    connectNativeWgc(targetHwnd);
+                }
+            }, backoff);
+        } else {
+            console.warn("[WGC] WebSocket 서킷 브레이커 트립됨. HTTP 대체 스트림으로 자동 전환합니다.");
+            $('statusTxt').innerHTML = '<span class="text-blue-500 font-medium">⚡ WebSocket 미지원 환경 감지 -> HTTP 스트림으로 자동 전환 중...</span>';
+            startHttpFallbackCapture(targetHwnd);
+        }
+    };
+
+    const connectNativeWgc = (targetHwnd) => {
+        state.wgcHwnd = targetHwnd;
+
+        // If WebSocket circuit breaker is OPEN, skip directly to HTTP fallback
+        if (wsCircuitBreaker.isOpen()) {
+            console.warn("[WGC] WebSocket 서킷 브레이커 OPEN: HTTP 대체 프로토콜로 즉시 전환합니다.");
+            startHttpFallbackCapture(targetHwnd);
+            return;
+        }
+
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${location.host}/ws/stream`;
+        $('statusTxt').innerHTML = `<span class="text-blue-500">🔵 네이티브 WGC 사이드카 연결 중... (${state.wsRetryCount + 1}/3)</span>`;
+
+        let connectionEstablished = false;
+        let wsHandshakeTimer = null;
+
+        try {
+            const ws = new WebSocket(wsUrl);
+            ws.binaryType = 'blob';
+
+            wsHandshakeTimer = setTimeout(() => {
+                if (!connectionEstablished) {
+                    console.warn("[WGC] WebSocket 핸드셰이크 타임아웃.");
+                    try { ws.close(); } catch (e) {}
+                    handleWsFailure(targetHwnd);
+                }
+            }, 3000);
+
+            ws.onopen = () => {
+                connectionEstablished = true;
+                if (wsHandshakeTimer) clearTimeout(wsHandshakeTimer);
+                wsCircuitBreaker.recordSuccess();
+                state.wsRetryCount = 0;
+
+                ws.send(JSON.stringify({
+                    action: 'start',
+                    target: targetHwnd,
+                    fps: 20,
+                    quality: 85
+                }));
+                $('overlayStandby').style.display = 'none';
+                $('btnShare').querySelector('span').innerText = "연결 해제";
+                $('btnStart').classList.remove('hidden');
+                $('vid').classList.add('hidden');
+                $('wgcCanvas').classList.remove('hidden');
+                if (chkHide && chkHide.checked) {
+                    updateConcealState(true);
+                }
+            };
+
+            ws.onmessage = async (e) => {
+                if (typeof e.data === 'string') {
+                    try {
+                        const msg = JSON.parse(e.data);
+                        if (msg.type === 'capture_state') {
+                            if (msg.state === 'PAUSED_MINIMIZED') {
+                                $('statusTxt').innerHTML = '<span class="text-amber-500 font-bold">⏸️ 대상 창이 최소화되었습니다 (캡처 대기 중)</span>';
+                                state.wgcStalled = true;
+                            } else if (msg.state === 'DEGRADED') {
+                                $('statusTxt').innerHTML = `<span class="text-amber-500 font-bold">⚠️ 캡처 성능 저하 (${msg.error || '지연'})</span>`;
+                                state.wgcStalled = true;
+                            } else if (msg.state === 'FAILED') {
+                                $('statusTxt').innerHTML = `<span class="text-rose-500 font-bold">🚨 캡처 실패: ${msg.error || '창 소실'}</span>`;
+                                state.wgcStalled = true;
+                            } else if (msg.state === 'CAPTURING') {
+                                if (state.wgcStalled) {
+                                    state.wgcStalled = false;
+                                    if (state.isRunning) {
+                                        $('statusTxt').innerText = "실시간 감지 및 추적 중...";
+                                    }
+                                }
+                            }
+                        } else if (msg.type === 'start_response') {
+                            if (!msg.data || !msg.data.success) {
+                                toast(`네이티브 캡처 실패: ${msg.data?.error || msg.data?.message || '대상 창을 찾을 수 없습니다.'}`, true);
+                                stopOps();
+                            } else {
+                                toast("네이티브 WGC 캡처 연결 성공");
+                            }
+                        }
+                    } catch (err) {
+                        console.warn("WGC WS text parse error:", err);
+                    }
+                    return;
+                }
+
+                // Binary Frame Processing
+                try {
+                    const bmp = await createImageBitmap(e.data);
+                    const cvs = state.wgcCanvas || $('wgcCanvas');
+                    if (cvs) {
+                        if (cvs.width !== bmp.width || cvs.height !== bmp.height) {
+                            cvs.width = bmp.width;
+                            cvs.height = bmp.height;
+                            $('resolutionInfo').innerText = `해상도: ${bmp.width}x${bmp.height} (WGC 원본)`;
+                        }
+                        const ctx = cvs.getContext('2d');
+                        ctx.drawImage(bmp, 0, 0);
+                    }
+                    bmp.close();
+                    state.wgcReady = true;
+                    state.wgcStalled = false;
+                    state.lastFrameArrival = Date.now();
+                } catch (err) {
+                    console.warn("WGC frame decode warning:", err);
+                }
+            };
+
+            ws.onerror = (err) => {
+                if (wsHandshakeTimer) clearTimeout(wsHandshakeTimer);
+                if (!connectionEstablished) {
+                    console.warn("[WGC] WebSocket 연결 오류 (핸드셰이크 실패). 서킷 브레이커 카운트 증가.");
+                    handleWsFailure(targetHwnd);
+                } else {
+                    console.error("WGC WebSocket error:", err);
+                    toast("WGC 사이드카 통신 오류", true);
+                }
+            };
+
+            ws.onclose = () => {
+                if (wsHandshakeTimer) clearTimeout(wsHandshakeTimer);
+                if (!connectionEstablished) {
+                    handleWsFailure(targetHwnd);
+                    return;
+                }
+                if (state.wgcWs === ws) {
+                    state.wgcWs = null;
+                    state.wgcReady = false;
+                    state.wgcStalled = false;
+                    const concealOverlay = $('streamConcealOverlay');
+                    if (concealOverlay) concealOverlay.style.display = 'none';
+                    stopOps();
+                }
+            };
+
+            state.wgcWs = ws;
+        } catch (err) {
+            if (wsHandshakeTimer) clearTimeout(wsHandshakeTimer);
+            console.error("WGC WebSocket creation failed:", err);
+            handleWsFailure(targetHwnd);
+        }
+    };
+    window.connectNativeWgc = connectNativeWgc;
+
     // --- Screen Share / Operation Control ---
     $('btnShare').onclick = async () => {
         if (state.captureMode === 'wgc') {
             // Native WGC Capture Mode
-            if (!state.wgcWs) {
+            const isConnected = !!(state.wgcWs || state.httpFallbackActive);
+            if (!isConnected) {
                 const sel = $('selWgcWindow');
                 const targetHwnd = sel ? sel.value : 0;
-                state.wgcHwnd = targetHwnd;
-
-                $('statusTxt').innerHTML = '<span class="text-blue-500">🔵 네이티브 WGC 사이드카 연결 중...</span>';
-                const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const wsUrl = `${protocol}//${location.host}/ws/stream`;
-
-                try {
-                    const ws = new WebSocket(wsUrl);
-                    ws.binaryType = 'blob';
-
-                    ws.onopen = () => {
-                        ws.send(JSON.stringify({
-                            action: 'start',
-                            target: targetHwnd,
-                            fps: 20,
-                            quality: 85
-                        }));
-                        $('overlayStandby').style.display = 'none';
-                        $('btnShare').querySelector('span').innerText = "연결 해제";
-                        $('btnStart').classList.remove('hidden');
-                        $('vid').classList.add('hidden');
-                        $('wgcCanvas').classList.remove('hidden');
-                        if (chkHide && chkHide.checked) {
-                            updateConcealState(true);
-                        }
-                    };
-
-                    ws.onmessage = async (e) => {
-                        if (typeof e.data === 'string') {
-                            try {
-                                const msg = JSON.parse(e.data);
-                                if (msg.type === 'capture_state') {
-                                    if (msg.state === 'PAUSED_MINIMIZED') {
-                                        $('statusTxt').innerHTML = '<span class="text-amber-500 font-bold">⏸️ 대상 창이 최소화되었습니다 (캡처 대기 중)</span>';
-                                        state.wgcStalled = true;
-                                    } else if (msg.state === 'DEGRADED') {
-                                        $('statusTxt').innerHTML = `<span class="text-amber-500 font-bold">⚠️ 캡처 성능 저하 (${msg.error || '지연'})</span>`;
-                                        state.wgcStalled = true;
-                                    } else if (msg.state === 'FAILED') {
-                                        $('statusTxt').innerHTML = `<span class="text-rose-500 font-bold">🚨 캡처 실패: ${msg.error || '창 소실'}</span>`;
-                                        state.wgcStalled = true;
-                                    } else if (msg.state === 'CAPTURING') {
-                                        if (state.wgcStalled) {
-                                            state.wgcStalled = false;
-                                            if (state.isRunning) {
-                                                $('statusTxt').innerText = "실시간 감지 및 추적 중...";
-                                            }
-                                        }
-                                    }
-                                } else if (msg.type === 'start_response') {
-                                    if (!msg.data || !msg.data.success) {
-                                        toast(`네이티브 캡처 실패: ${msg.data?.error || msg.data?.message || '대상 창을 찾을 수 없습니다.'}`, true);
-                                        stopOps();
-                                    } else {
-                                        toast("네이티브 WGC 캡처 연결 성공");
-                                    }
-                                }
-                            } catch (err) {
-                                console.warn("WGC WS text parse error:", err);
-                            }
-                            return;
-                        }
-
-                        // Binary Frame Processing
-                        try {
-                            const bmp = await createImageBitmap(e.data);
-                            const cvs = state.wgcCanvas || $('wgcCanvas');
-                            if (cvs) {
-                                if (cvs.width !== bmp.width || cvs.height !== bmp.height) {
-                                    cvs.width = bmp.width;
-                                    cvs.height = bmp.height;
-                                    $('resolutionInfo').innerText = `해상도: ${bmp.width}x${bmp.height} (WGC 원본)`;
-                                }
-                                const ctx = cvs.getContext('2d');
-                                ctx.drawImage(bmp, 0, 0);
-                            }
-                            bmp.close();
-                            state.wgcReady = true;
-                            state.wgcStalled = false;
-                            state.lastFrameArrival = Date.now();
-                        } catch (err) {
-                            console.warn("WGC frame decode warning:", err);
-                        }
-                    };
-
-                    ws.onerror = (err) => {
-                        console.error("WGC WebSocket error:", err);
-                        toast("WGC 사이드카 연결 오류", true);
-                    };
-
-                    ws.onclose = () => {
-                        if (state.wgcWs === ws) {
-                            state.wgcWs = null;
-                            state.wgcReady = false;
-        state.wgcStalled = false;
-        const concealOverlay = $('streamConcealOverlay');
-        if (concealOverlay) concealOverlay.style.display = 'none';
-                            stopOps();
-                        }
-                    };
-
-                    state.wgcWs = ws;
-                } catch (err) {
-                    toast(`WGC 연결 실패: ${err.message}`, true);
-                }
+                connectNativeWgc(targetHwnd);
             } else {
                 stopOps();
             }
@@ -605,6 +794,10 @@
         state.isRunning = false;
         state.isInferenceInFlight = false;
         clearTimeout(state.timer);
+        clearTimeout(state.wsRetryTimer);
+        clearTimeout(state.fallbackTimer);
+        state.wsRetryCount = 0;
+
         if (state.abortController) {
             state.abortController.abort();
             state.abortController = null;
@@ -622,6 +815,14 @@
             } catch (e) {}
             state.wgcWs = null;
         }
+
+        if (state.httpFallbackActive) {
+            state.httpFallbackActive = false;
+            try {
+                fetch('/api/capture/stop', { method: 'POST' }).catch(() => {});
+            } catch (e) {}
+        }
+
         state.wgcReady = false;
         state.wgcStalled = false;
         const concealOverlay = $('streamConcealOverlay');

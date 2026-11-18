@@ -45,7 +45,14 @@ pause >nul
 exit /b 1
 
 :FOUND_PY
-:: 2. 서버 실행 및 브라우저 자동 오픈
+:: 2. 필수 패키지(websockets 등) 사전 점검 및 자동 설치 (Self-Healing)
+"%PY_CMD%" -c "import websockets" >nul 2>&1
+if errorlevel 1 (
+    echo [*] 필수 라이브러리(websockets) 누락 감지. 자동 자가 치유(Self-Healing) 설치를 진행합니다...
+    "%PY_CMD%" -m pip install "websockets>=12.0"
+)
+
+:: 3. 서버 실행 및 브라우저 자동 오픈
 "%PY_CMD%" scripts\launcher.py run
 set "LAUNCH_ERR=%ERRORLEVEL%"
 

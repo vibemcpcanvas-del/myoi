@@ -228,6 +228,32 @@
 * **감사 판정**: `[PASS]`
 * **롤백 전략**: `git checkout HEAD -- src/ static/ run.py WBS.md; rm src/capture/ tests/test_native_wgc_capture.py tests/test_stream_concealment_bug.py`
 
+---
+
+### [WBS-10] 런처 의존성 자가 치유(Self-Healing) 및 프런트엔드 멀티 프로토콜 폴백 & 서킷 브레이커 구축
+
+* **목표 및 범위**: uvicorn 구동 시 WebSocket 라이브러리(`websockets`) 누락으로 인한 404 거부 및 브라우저 무한 재연결 콘솔 플러드 근본 해결. `websockets>=12.0` 의존성 명시 선언, 원클릭 런처(`실행하기.bat`, `scripts/launcher.py`) 사전 검사 시 누락 패키지 자동 설치(Self-Healing), 프런트엔드(`static/app.js`) WebSocket 연결 실패 시 지수 백오프 및 서킷 브레이커(최대 3회 재시도 후 OPEN) 적용, 그리고 HTTP MJPEG 스트림(`/api/stream`) 및 프레임 폴링(`/api/capture/frame`)으로의 끊김 없는 무중단 자동 폴백 구축.
+* **선행 의존성**: WBS-09 [PASS]
+* **담당자**: 개발자 (Antigravity Coordinator Gemini) / PM 어드바이저 (Coarena GPT-6 Luna)
+* **산출물**:
+  - `requirements.txt`
+  - `scripts/launcher.py`
+  - `실행하기.bat`
+  - `src/server.py`
+  - `static/app.js`
+  - `tests/test_stream_fallback_and_self_healing.py`
+  - `WBS.md`
+* **인수 기준**:
+  1. `requirements.txt`에 `websockets>=12.0` 명시 선언 및 Python 환경 설치 완료.
+  2. `scripts/launcher.py` 환경 점검 시 `websockets` 부재 시 pip 자동 설치 및 자가 치유(Self-Healing) 정상 작동 입증.
+  3. `실행하기.bat` 사전 실행 점검에서 `import websockets` 누락 시 자동 설치 및 서버 정상 기동 입증.
+  4. 프런트엔드 WebSocket 실패 시 서버 무한 폭격 차단: 지수 백오프 및 3회 초과 시 서킷 브레이커 OPEN 전이 입증.
+  5. WebSocket 미지원/404 시 HTTP 스트림 프로토콜(`/api/capture/frame` / `/api/stream`)으로 자동 전환되어 화면 캡처 및 YOLO 탐지 중단 없이 연속 작동 보장.
+  6. 신규 8종 단위/통합 테스트 포함 전체 172개 테스트 100% PASS 및 무회귀 입증.
+  7. WBS 게이트 유효성 검사기(`python scripts/wbs_gate_validator.py`) 100% 통과.
+* **감사 판정**: `[PASS]`
+* **롤백 전략**: `git checkout HEAD -- requirements.txt scripts/launcher.py 실행하기.bat src/server.py static/app.js WBS.md; rm tests/test_stream_fallback_and_self_healing.py`
+
 
 
 

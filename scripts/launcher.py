@@ -31,6 +31,7 @@ LOG_FILE = LOGS_DIR / "server.log"
 REQUIRED_PACKAGES = [
     ("fastapi", "fastapi"),
     ("uvicorn", "uvicorn"),
+    ("websockets", "websockets>=12.0"),
     ("httpx", "httpx"),
     ("pydantic", "pydantic"),
     ("PIL", "pillow"),
@@ -44,8 +45,8 @@ EXIT_HEALTH_TIMEOUT = 5
 EXIT_PID_MISMATCH = 6
 
 
-def check_python_environment() -> tuple[bool, str]:
-    """Verify Python version and required dependencies."""
+def check_python_environment(auto_heal: bool = True) -> tuple[bool, str]:
+    """Verify Python version and required dependencies with automatic self-healing."""
     if sys.version_info < (3, 10):
         return False, (
             f"Python 버전이 낮습니다 ({sys.version.split()[0]}). "
@@ -55,11 +56,43 @@ def check_python_environment() -> tuple[bool, str]:
     missing = []
     for import_name, pkg_name in REQUIRED_PACKAGES:
         if importlib.util.find_spec(import_name) is None:
-            missing.append(pkg_name)
+            missing.append((import_name, pkg_name))
 
-    if missing:
+    if missing and auto_heal:
+        print("[*] 필수 패키지 누락 감지. 자동 자가 치유(Self-Healing) 설치를 진행합니다...")
+        for import_name, pkg_name in missing:
+            print(f"  -> 패키지 자동 설치 시도 중: {pkg_name} ...")
+            try:
+                res = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", pkg_name],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=60,
+                )
+                if res.returncode == 0:
+                    print(f"  [성공] {pkg_name} 자동 설치 완료!")
+                else:
+                    print(f"  [경고] {pkg_name} 자동 설치 실패: {res.stderr.strip() or res.stdout.strip()}")
+            except Exception as e:
+                print(f"  [경고] {pkg_name} 설치 중 예외 발생: {e}")
+
+        # Re-check after auto-heal attempt
+        importlib.invalidate_caches()
+        remaining_missing = []
+        for import_name, pkg_name in REQUIRED_PACKAGES:
+            if importlib.util.find_spec(import_name) is None:
+                remaining_missing.append(pkg_name)
+
+        if not remaining_missing:
+            return True, "정상"
+        missing_names = remaining_missing
+    else:
+        missing_names = [pkg_name for _, pkg_name in missing]
+
+    if missing_names:
         return False, (
-            f"필수 패키지가 설치되어 있지 않습니다: {', '.join(missing)}\n"
+            f"필수 패키지가 설치되어 있지 않습니다: {', '.join(missing_names)}\n"
             f"해결 방법: 터미널에서 다음 명령어를 실행해주세요.\n"
             f"  pip install -r requirements.txt"
         )
