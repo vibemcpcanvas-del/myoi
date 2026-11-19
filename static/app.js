@@ -523,18 +523,16 @@
                 return;
             }
 
-            $('overlayStandby').style.display = 'none';
             const btnShare = $('btnShare');
             if (btnShare && btnShare.querySelector('span')) {
                 btnShare.querySelector('span').innerText = "연결 해제";
             }
-            $('btnStart').classList.remove('hidden');
             $('vid').classList.add('hidden');
             $('wgcCanvas').classList.remove('hidden');
             if (chkHide && chkHide.checked) {
                 updateConcealState(true);
             }
-            $('statusTxt').innerHTML = '<span class="text-emerald-500 font-bold">⚡ 네이티브 연결됨 (HTTP 스트림 프로토콜)</span>';
+            $('statusTxt').innerHTML = '<span class="text-blue-500 font-bold">⚡ HTTP 스트림 프로토콜 활성화... 프레임 수신 대기 중</span>';
             toast("HTTP 대체 프로토콜로 네이티브 캡처가 연결되었습니다.");
 
             let pollingInFlight = false;
@@ -567,6 +565,11 @@
                         state.wgcReady = true;
                         state.wgcStalled = false;
                         state.lastFrameArrival = Date.now();
+                        $('overlayStandby').style.display = 'none';
+                        $('btnStart').classList.remove('hidden');
+                        if (!state.isRunning) {
+                            $('statusTxt').innerHTML = '<span class="text-emerald-500 font-bold">⚡ 네이티브 연결됨 (HTTP 스트림 수신 중)</span>';
+                        }
                     } else if (frameRes.status === 503) {
                         state.wgcStalled = true;
                     } else {
@@ -729,7 +732,7 @@
                                 stopOps();
                             } else {
                                 toast("네이티브 WGC 캡처 연결 성공");
-                                $('btnStart').classList.remove('hidden');
+                                $('statusTxt').innerHTML = '<span class="text-blue-500 font-bold">⚡ 네이티브 WGC 세션 확립... 프레임 수신 대기 중</span>';
                             }
                         }
                     } catch (err) {
@@ -755,7 +758,11 @@
                     state.wgcReady = true;
                     state.wgcStalled = false;
                     state.lastFrameArrival = Date.now();
+                    $('overlayStandby').style.display = 'none';
                     $('btnStart').classList.remove('hidden');
+                    if (!state.isRunning) {
+                        $('statusTxt').innerHTML = '<span class="text-emerald-500 font-bold">⚡ 네이티브 연결됨 (실시간 프레임 수신 중)</span>';
+                    }
                 } catch (err) {
                     console.warn("WGC frame decode warning:", err);
                 }
@@ -872,8 +879,13 @@
 
         if (state.httpFallbackActive) {
             state.httpFallbackActive = false;
+        }
+
+        if (state.captureMode === 'wgc') {
             try {
-                fetch('/api/capture/stop', { method: 'POST' }).catch(() => {});
+                if (typeof fetch === 'function') {
+                    fetch('/api/capture/stop', { method: 'POST' }).catch(() => {});
+                }
             } catch (e) {}
         }
 
@@ -892,7 +904,7 @@
         if (overlayStandby) overlayStandby.style.display = 'flex';
         const btnShare = $('btnShare');
         if (btnShare && btnShare.querySelector('span')) {
-            btnShare.querySelector('span').innerText = state.captureMode === 'wgc' ? "🖥️ 네이티브 연결" : "🌐 화면 공유";
+            btnShare.querySelector('span').innerText = state.captureMode === 'wgc' ? "⚡ 네이티브 연결" : "🌐 화면 공유";
         }
         $('btnStart').classList.add('hidden');
         $('btnStop').classList.add('hidden');

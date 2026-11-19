@@ -502,11 +502,147 @@ def test_batch_launcher_executes_without_syntax_error():
 
 
 def test_app_js_wgc_button_display_invariants():
-    """Verify app.js does not prematurely show btnStart until start_response succeeds or frames arrive."""
+    """Verify app.js does not prematurely show btnStart on start_response until valid frames arrive."""
     content = APP_JS.read_text(encoding="utf-8")
     # Verify auto-recovery to HTTP stream on unexpected WS disconnect
     assert "startHttpFallbackCapture" in content
     assert "WebSocket 스트림 연결 끊김" in content
-    # Verify btnStart is displayed in start_response or binary frame
-    assert "$('btnStart').classList.remove('hidden')" in content
+
+    # Verify btnStart is NOT prematurely exposed inside start_response
+    start_resp_idx = content.find("msg.type === 'start_response'")
+    assert start_resp_idx != -1
+    start_resp_block = content[start_resp_idx:start_resp_idx + 400]
+    assert "$('btnStart').classList.remove('hidden')" not in start_resp_block, (
+        "[INVARIANT VIOLATION] btnStart must not be exposed on start_response before frames arrive"
+    )
+
+    # Node.js DOM behavioral verification
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js binary not available for app.js headless test")
+
+    node_wgc_lifecycle_script = f"""
+    const fs = require('fs');
+    const appCode = fs.readFileSync({repr(str(APP_JS))}, 'utf8');
+
+    let btnStartClasses = new Set(['hidden']);
+    let fetchUrls = [];
+    let lastCreatedWs = null;
+
+    global.createImageBitmap = () => Promise.resolve({{ width: 1280, height: 720, close: () => {{}} }});
+
+    global.window = {{
+        ReviewManager: function() {{
+            this.records = [];
+            this.saveCurrentSessionToServer = () => {{}};
+            this.updateSessionBadge = () => {{}};
+        }},
+        CoordinateAdapter: {{ calculateLetterbox: () => ({{ padX: 0, padY: 0, scaledW: 640, scaledH: 480 }}) }},
+        addEventListener: () => {{}},
+        removeEventListener: () => {{}},
+        createImageBitmap: global.createImageBitmap
+    }};
+
+    global.WebSocket = function(url) {{
+        this.url = url;
+        this.binaryType = 'blob';
+        this.onopen = null;
+        this.onmessage = null;
+        this.onerror = null;
+        this.onclose = null;
+        this.send = (data) => {{}};
+        this.close = () => {{}};
+        lastCreatedWs = this;
+    }};
+
+    global.document = {{
+        documentElement: {{ classList: {{ contains: () => false, add: () => {{}}, remove: () => {{}}, toggle: () => {{}} }} }},
+        body: {{ appendChild: () => {{}}, onclick: null }},
+        getElementById: (id) => {{
+            if (id === 'btnStart') {{
+                return {{
+                    style: {{}},
+                    classList: {{
+                        add: (c) => btnStartClasses.add(c),
+                        remove: (c) => btnStartClasses.delete(c),
+                        contains: (c) => btnStartClasses.has(c)
+                    }},
+                    querySelector: () => ({{ innerText: '' }}),
+                    onclick: null
+                }};
+            }}
+            return {{
+                style: {{ display: '' }},
+                classList: {{ add: () => {{}}, remove: () => {{}}, toggle: () => {{}}, contains: () => false }},
+                querySelector: () => ({{ innerText: '' }}),
+                getContext: () => ({{ fillRect: () => {{}}, drawImage: () => {{}}, clearRect: () => {{}} }}),
+                appendChild: () => {{}},
+                width: 1280, height: 720
+            }};
+        }},
+        createElement: () => ({{
+            width: 1280, height: 720,
+            style: {{}},
+            classList: {{ add: () => {{}}, remove: () => {{}}, contains: () => false }},
+            getContext: () => ({{ fillRect: () => {{}}, drawImage: () => {{}}, clearRect: () => {{}} }}),
+            remove: () => {{}}
+        }})
+    }};
+    global.location = {{ protocol: 'http:', host: '127.0.0.1:8000' }};
+    global.localStorage = {{ getItem: () => null, setItem: () => null }};
+    global.navigator = {{ mediaDevices: {{}} }};
+    global.fetch = (url, opts) => {{
+        fetchUrls.push(url);
+        return Promise.resolve({{ ok: true, json: () => Promise.resolve({{ success: true, windows: [] }}) }});
+    }};
+
+    eval(appCode);
+
+    // 1. Initial State: btnStart must be hidden
+    if (!btnStartClasses.has('hidden')) {{
+        throw new Error("btnStart must initially be hidden");
+    }}
+
+    // 2. Connect WGC: start WebSocket
+    window.connectNativeWgc(0);
+    if (!lastCreatedWs) throw new Error("WebSocket was not initialized");
+    lastCreatedWs.onopen();
+
+    // 3. On start_response success: btnStart must STILL be hidden (frames haven't arrived)
+    lastCreatedWs.onmessage({{ data: JSON.stringify({{ type: 'start_response', data: {{ success: true }} }}) }});
+    if (!btnStartClasses.has('hidden')) {{
+        throw new Error("btnStart must NOT be shown upon start_response before frames arrive");
+    }}
+
+    // 4. On binary frame arrival: btnStart must now be unhidden
+    lastCreatedWs.onmessage({{ data: Buffer.from([0xff, 0xd8, 0xff, 0xe0]) }}).then(() => {{
+        if (btnStartClasses.has('hidden')) {{
+            throw new Error("btnStart was not shown after valid frame arrival");
+        }}
+
+        // 5. On stopOps: btnStart must be hidden again and /api/capture/stop invoked
+        window.stopOps();
+        if (!btnStartClasses.has('hidden')) {{
+            throw new Error("stopOps did not hide btnStart");
+        }}
+        if (!fetchUrls.includes('/api/capture/stop')) {{
+            throw new Error("stopOps did not invoke /api/capture/stop");
+        }}
+
+        console.log("WGC_BUTTON_INVARIANTS_PASS");
+        process.exit(0);
+    }}).catch(err => {{
+        console.error(err);
+        process.exit(1);
+    }});
+    """
+
+    res = subprocess.run(
+        [node_bin, "-e", node_wgc_lifecycle_script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert res.returncode == 0, f"Node.js WGC button invariants test failed: {res.stderr} / {res.stdout}"
+    assert "WGC_BUTTON_INVARIANTS_PASS" in res.stdout
 

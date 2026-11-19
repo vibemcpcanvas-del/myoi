@@ -275,7 +275,7 @@
   1. `실행하기.bat` 내 `cmd.exe` 예약 괄호 파싱 충돌 완전 근절 및 `cmd.exe /c "실행하기.bat --no-pause --help"` 실제 구동 시 오류 코드 0 반환 입증.
   2. 대화형 실행 시 성공(`0`) 및 오류(비`0`) 모든 경로에서 `pause >nul`을 보장하여 사용자가 키를 누르기 전에 창이 꺼지지 않음 입증.
   3. `scripts/launcher.py`에 `--no-pause` 인자 지원 및 기실행 중인 서버 감지 시 안내 출력.
-  4. 프런트엔드(`static/app.js`)에서 캡처 시작 응답 성공(`start_response`) 또는 첫 바이너리 프레임 수신 전까지 `btnStart` 노출 차단(핸드셰이크 선행 원칙).
+  4. 프런트엔드(`static/app.js`)에서 첫 유효 프레임이 수신·디코딩되어 `wgcReady = true`가 확립되기 전까지 `btnStart` 노출 엄격 차단(프레임 주도 노출 원칙) 및 `stopOps` 시 백엔드 캡처 서비스 종료(`/api/capture/stop`) 연동.
   5. 웹소켓 세션 도중 예기치 않은 단절 발생 시 즉시 중단되지 않고 HTTP 스트림 프로토콜로 무중단 자동 복구.
   6. 서버 측 `websocket_stream_endpoint` 액션별 예외 처리 격리로 웹소켓 세션 보호.
   7. `docs/QUALITY_POSTMORTEM.md` 및 `LESSONS.md`에 근본 원인 분석, 5대 안티 결함 불변식, 릴리즈 전 필수 스모크 체크리스트 기록.

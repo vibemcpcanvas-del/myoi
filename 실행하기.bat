@@ -6,6 +6,14 @@ title SCHALE 전투 추적 시스템 (myoi)
 cd /d "%~dp0"
 set "PYTHONPATH=%~dp0;%PYTHONPATH%"
 
+:: 옵션 플래그 파싱 (--no-pause 등 비대화형 실행 지원)
+set "NO_PAUSE="
+for %%A in (%*) do (
+    if "%%A"=="--no-pause" set "NO_PAUSE=1"
+    if "%%A"=="--help" set "NO_PAUSE=1"
+    if "%%A"=="-h" set "NO_PAUSE=1"
+)
+
 echo ========================================================================
 echo   SCHALE 전투 추적 및 YOLO 데이터 수집 시스템 (myoi)
 echo ========================================================================
@@ -40,8 +48,10 @@ echo  1. https://www.python.org/downloads/ 에서 Python 3.10 이상을 설치�
 echo  2. 설치 마법사 창 맨 아래의 [Add python.exe to PATH] 체크박스를 꼭 체크해주세요.
 echo ========================================================================
 echo.
-echo 아무 키나 누르면 창을 닫습니다...
-pause >nul
+if not defined NO_PAUSE (
+    echo 아무 키나 누르면 창을 닫습니다...
+    pause >nul
+)
 exit /b 1
 
 :FOUND_PY
@@ -55,14 +65,6 @@ if errorlevel 1 (
 :: 3. 서버 실행 및 브라우저 자동 오픈
 "%PY_CMD%" scripts\launcher.py run %*
 set "LAUNCH_ERR=%ERRORLEVEL%"
-
-:: 옵션 플래그 파싱 (--no-pause 등 비대화형 실행 지원)
-set "NO_PAUSE="
-for %%A in (%*) do (
-    if "%%A"=="--no-pause" set "NO_PAUSE=1"
-    if "%%A"=="--help" set "NO_PAUSE=1"
-    if "%%A"=="-h" set "NO_PAUSE=1"
-)
 
 if not "%LAUNCH_ERR%"=="0" (
     echo.

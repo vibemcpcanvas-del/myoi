@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 import logging
+import os
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -122,7 +123,7 @@ class CaptureService:
                     target_info = found
                 elif isinstance(target, int):
                     target_hwnd = target
-                elif str(target).isdigit():
+                elif str(target).lstrip("-").isdigit():
                     target_hwnd = int(target)
                 else:
                     return {

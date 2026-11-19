@@ -426,6 +426,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("\n[*] 사용자에 의해 서버가 중단되었습니다.")
         return 0
+    except SystemExit as se:
+        if se.code == 0:
+            return 0
+        print(f"\n[오류] 서버 비정상 종료 (SystemExit: {se.code})")
+        return se.code if isinstance(se.code, int) and se.code != 0 else EXIT_EARLY_CRASH
     except Exception as e:
         print(f"\n[오류] 서버 비정상 중단: {e}")
         return EXIT_EARLY_CRASH
