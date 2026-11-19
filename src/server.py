@@ -647,6 +647,28 @@ async def start_capture_endpoint(request: Request) -> Dict[str, Any]:
     return result
 
 
+@app.post("/api/capture/switch")
+@measure_telemetry(metric_name="api_capture_switch")
+async def switch_capture_endpoint(request: Request) -> Dict[str, Any]:
+    """Dynamically switches active capture target window."""
+    cfg = get_config()
+    capture_svc = get_capture_service(mock_mode=cfg.mock_inference)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    target = body.get("target") if "target" in body else body.get("hwnd", 0)
+    result = capture_svc.switch_target(target=target)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND if result.get("error") == "target_window_not_found" else status.HTTP_400_BAD_REQUEST,
+            detail=result,
+        )
+    return result
+
+
 @app.post("/api/capture/stop")
 @measure_telemetry(metric_name="api_capture_stop")
 async def stop_capture_endpoint() -> Dict[str, Any]:
@@ -808,6 +830,14 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                         logger.warning(f"Failed to start capture: {exc}")
                         res = {"success": False, "error": "capture_start_error", "message": str(exc)}
                     await websocket.send_json({"type": "start_response", "data": res})
+                elif action in ("switch_target", "switch"):
+                    target = payload.get("target") if "target" in payload else payload.get("hwnd", 0)
+                    try:
+                        res = capture_svc.switch_target(target=target)
+                    except Exception as exc:
+                        logger.warning(f"Failed to switch capture target: {exc}")
+                        res = {"success": False, "error": "capture_switch_error", "message": str(exc)}
+                    await websocket.send_json({"type": "switch_response", "data": res})
                 elif action == "stop":
                     try:
                         res = capture_svc.stop_capture()

@@ -45,7 +45,7 @@ class CaptureService:
         self.finder = WindowFinder(mock_mode=mock_mode)
         self.engine = NativeCaptureEngine(mock_mode=mock_mode)
 
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._is_running = False
         self._current_state = CaptureState.IDLE
         self._last_frame_perf = 0.0
@@ -109,56 +109,80 @@ class CaptureService:
     ) -> Dict[str, Any]:
         """Starts background window or desktop capture."""
         with self._lock:
-            if self._is_running:
-                self._stop_worker_locked()
-
-            # Resolve target
-            target_hwnd = 0
-            target_info = None
-
-            if target != 0 and target != "0" and target != "desktop":
-                found = self.finder.find_window(target)
-                if found:
-                    target_hwnd = found.hwnd
-                    target_info = found
-                elif isinstance(target, int):
-                    target_hwnd = target
-                elif str(target).lstrip("-").isdigit():
-                    target_hwnd = int(target)
-                else:
-                    return {
-                        "success": False,
-                        "error": "target_window_not_found",
-                        "message": f"Target window matching '{target}' was not found.",
-                    }
-
-            self._target_hwnd = target_hwnd
-            self._target_info = target_info
             self._target_fps = max(1, min(fps, 60))
             self._quality = max(10, min(quality, 100))
+            return self._switch_target_locked(target)
+
+    def switch_target(self, target: int | str = 0) -> Dict[str, Any]:
+        """Dynamically switches active capture target window without tearing down streams."""
+        with self._lock:
+            return self._switch_target_locked(target)
+
+    def _switch_target_locked(self, target: int | str = 0) -> Dict[str, Any]:
+        """Internal lock-held target resolution and dynamic switching logic."""
+        target_hwnd = 0
+        target_info = None
+
+        if target != 0 and target != "0" and target != "desktop":
+            found = self.finder.find_window(target)
+            if found:
+                target_hwnd = found.hwnd
+                target_info = found
+            elif isinstance(target, int):
+                target_hwnd = target
+            elif str(target).lstrip("-").isdigit():
+                target_hwnd = int(target)
+            else:
+                return {
+                    "success": False,
+                    "error": "target_window_not_found",
+                    "message": f"Target window matching '{target}' was not found.",
+                }
+
+        self._target_hwnd = target_hwnd
+        self._target_info = target_info
+
+        # Purge stale frame cache to prevent leaking old window frames
+        self._latest_image = None
+        self._latest_jpeg = None
+        self._latest_meta = {}
+        self._last_frame_perf = time.perf_counter()
+        self._telemetry.target_window = target_info.to_dict() if target_info else None
+        self._telemetry.last_frame_timestamp = 0.0
+        self._telemetry.seq_id += 1
+        self._telemetry.stalled = False
+
+        if not self._is_running or self._worker_thread is None or not self._worker_thread.is_alive():
             self._stop_event.clear()
             self._is_running = True
             self._current_state = CaptureState.CAPTURING
-            self._last_frame_perf = time.perf_counter()
             self._telemetry.status = "capturing"
             self._telemetry.state = CaptureState.CAPTURING.value
-            self._telemetry.stalled = False
-            self._telemetry.target_window = target_info.to_dict() if target_info else None
-
             self._worker_thread = threading.Thread(
                 target=self._capture_worker_loop,
                 name="schale-wgc-worker",
                 daemon=True,
             )
             self._worker_thread.start()
-
-            return {
-                "success": True,
-                "targetHwnd": self._target_hwnd,
+        else:
+            self._current_state = CaptureState.CAPTURING
+            self._telemetry.status = "capturing"
+            self._telemetry.state = CaptureState.CAPTURING.value
+            self._dispatch_control_to_queues({
+                "type": "target_switched",
+                "targetHwnd": target_hwnd,
                 "targetTitle": target_info.title if target_info else "전체 데스크톱",
-                "fps": self._target_fps,
-                "state": CaptureState.CAPTURING.value,
-            }
+                "seq_id": self._telemetry.seq_id,
+                "timestamp": time.time(),
+            })
+
+        return {
+            "success": True,
+            "targetHwnd": self._target_hwnd,
+            "targetTitle": target_info.title if target_info else "전체 데스크톱",
+            "fps": self._target_fps,
+            "state": CaptureState.CAPTURING.value,
+        }
 
     def stop_capture(self) -> Dict[str, Any]:
         with self._lock:
@@ -197,8 +221,6 @@ class CaptureService:
             if self._current_state in (CaptureState.PAUSED_MINIMIZED, CaptureState.FAILED):
                 return None
             return self._latest_image.copy() if self._latest_image else None
-        with self._lock:
-            return self._latest_image.copy() if self._latest_image else None
 
     def register_async_queue(self, queue: asyncio.Queue) -> None:
         with self._lock:
@@ -217,7 +239,9 @@ class CaptureService:
             t0 = time.perf_counter()
 
             try:
-                img, meta = self.engine.capture_frame(self._target_hwnd)
+                with self._lock:
+                    current_target = self._target_hwnd
+                img, meta = self.engine.capture_frame(current_target)
 
                 if img is not None:
                     jpeg_bytes = self.engine.encode_jpeg(img, quality=self._quality)
@@ -279,7 +303,7 @@ class CaptureService:
                         "state": new_state.value,
                         "status": status_str,
                         "error": meta.get("error", "Capture degraded"),
-                        "hwnd": self._target_hwnd,
+                        "hwnd": current_target,
                         "timestamp": time.time(),
                     })
             except Exception as e:
@@ -296,7 +320,7 @@ class CaptureService:
                     "state": CaptureState.FAILED.value,
                     "status": "error",
                     "error": str(e),
-                    "hwnd": self._target_hwnd,
+                    "hwnd": current_target,
                     "timestamp": time.time(),
                 })
 
@@ -320,7 +344,7 @@ class CaptureService:
                     "state": CaptureState.DEGRADED.value,
                     "status": "stalled",
                     "error": "Frame capture stalled (>1.0s without fresh frame)",
-                    "hwnd": self._target_hwnd,
+                    "hwnd": current_target,
                     "timestamp": time.time(),
                 })
 

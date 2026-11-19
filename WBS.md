@@ -284,6 +284,35 @@
 * **감사 판정**: `[PASS]`
 * **롤백 전략**: `git checkout HEAD~1`
 
+---
+
+### [WBS-12] 동적 캡처 창 전환 및 WebRTC 프리징 방지 엔진 구축
+
+* **목표 및 범위**: 사용자 제보("창 전환 불가 및 WebRTC 실행 시 크롬 멈춤 문제 해결")에 따른 두 가지 핵심 결함 해결. 1) 네이티브 WGC 캡처 파이프라인에서 드롭다운(`selWgcWindow`) 변경 시 실행 중단 없이 백엔드 타겟을 원활히 변경하는 동적 리타겟팅(`switchWgcTarget`, `switch_target`, `POST /api/capture/switch`, WebSocket 액션) 및 전환 시 잔류 이전 프레임 즉시 정화, 2) WebRTC 활성화 시 크롬 브라우저가 정지되는 결함 근본 해결(`connectWebRtc`, `isConnectingWebRtc` 재귀 락, `selfBrowserSurface: "exclude"` 탭 무한 거울 렌더링 루프 차단, `vid.play()` 프로미스 예외 가드, `readyState >= 2` 프레임 주도 UI 노출, `stopOps` 비디오 디코더 안전 정지), 3) 향후 React/Next.js, Vue/Nuxt, Rust Native Core 이식 영향도 및 기술 가이드(`docs/PORTING_GUIDE.md`) 작성, 4) 신규 12종 단위/통합 테스트 스위트 구축.
+* **선행 의존성**: WBS-11 [PASS]
+* **담당자**: 개발자 (Antigravity Coordinator Gemini) / PM 어드바이저 (Coarena GPT-6 Luna)
+* **산출물**:
+  - `src/capture/service.py`
+  - `src/server.py`
+  - `static/app.js`
+  - `docs/PORTING_GUIDE.md`
+  - `LESSONS.md`
+  - `tests/test_window_switch_and_webrtc.py`
+  - `WBS.md`
+* **인수 기준**:
+  1. `CaptureService.switch_target` 및 `POST /api/capture/switch`, WebSocket `switch_target` 액션이 실행 중단 없이 대상 HWND를 동적으로 변경함을 입증.
+  2. 타겟 전환 시 이전 창 프레임 캐시(`_latest_image`, `_latest_jpeg`)가 즉각 파기되어 새 창 이전 데이터 유출이 차단됨을 입증.
+  3. 존재하지 않는 대상 창으로의 전환 시 조용한 폴백(Silent fallback) 없이 명시적 404 및 에러 반환(Fail-Closed) 입증.
+  4. WebRTC 연결 시 `isConnectingWebRtc` 재귀 락 및 `selfBrowserSurface: "exclude"` 제약 조건 적용으로 크롬 브라우저 거울 루프 프리징 원천 차단 입증.
+  5. WebRTC 프레임 주도 노출: 비디오 엘리먼트가 실제로 유효 치수(`videoWidth > 0`, `videoHeight > 0`)와 `readyState >= 2`를 확립하기 전까지 실행 버튼 노출 차단 입증.
+  6. `stopOps` 호출 시 미디어 트랙 정지, 비디오 엘리먼트 정지 및 이벤트 리스너가 누수 없이 안전하게 해제됨을 입증.
+  7. Node.js 런타임 환경에서 `connectWebRtc` 및 `switchWgcTarget` 라이프사이클 100% 정상 작동 입증.
+  8. React/Next.js, Vue/Nuxt, Rust Native Core 이식 분석 문서(`docs/PORTING_GUIDE.md`) 작성 완료.
+  9. 신규 12종 전용 테스트 포함 전체 190개 테스트 100% PASS 및 무회귀 입증.
+  10. WBS 게이트 유효성 검사기(`python scripts/wbs_gate_validator.py`) 100% 통과.
+* **감사 판정**: `[PASS]`
+* **롤백 전략**: `git checkout HEAD~1`
+
 
 
 

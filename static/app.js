@@ -14,7 +14,13 @@
         d.className = `toast ${err ? 'border-red-500 text-red-600' : 'text-gray-800'}`;
         d.innerHTML = msg;
         $('toastBox').appendChild(d);
-        setTimeout(() => d.remove(), 3500);
+        setTimeout(() => {
+            if (typeof d.remove === 'function') {
+                d.remove();
+            } else if (d.parentNode) {
+                d.parentNode.removeChild(d);
+            }
+        }, 3500);
     };
     window.toast = toast;
 
@@ -48,6 +54,9 @@
         wgcCanvas: $('wgcCanvas'),
         wgcCtx: $('wgcCanvas') ? $('wgcCanvas').getContext('2d') : null,
         wgcHwnd: 0,
+        wgcTargetHwnd: 0,
+        isConnectingWebRtc: false,
+        webrtcReady: false,
         // Offscreen canvases
         pCvs: document.createElement('canvas'), // 640x640 letterbox canvas for inference
         origCvs: document.createElement('canvas'), // full resolution clean original canvas
@@ -426,7 +435,7 @@
         } else {
             if (!state.stream) return null;
             const vid = $('vid');
-            if (!vid || !vid.videoWidth || !vid.videoHeight) return null;
+            if (!vid || vid.readyState < 2 || !vid.videoWidth || !vid.videoHeight) return null;
             return {
                 element: vid,
                 width: vid.videoWidth,
@@ -435,6 +444,55 @@
         }
     };
     window.getFrameSource = getFrameSource;
+
+    // --- Dynamic Window Retargeting ---
+    const switchWgcTarget = async (newHwnd) => {
+        state.wgcTargetHwnd = newHwnd;
+        state.wgcHwnd = newHwnd;
+
+        const isConnected = !!(state.wgcWs || state.httpFallbackActive);
+        if (!isConnected) {
+            return;
+        }
+
+        // Invalidate ready state until fresh frame arrives from newly targeted window
+        state.wgcReady = false;
+        $('statusTxt').innerHTML = `<span class="text-blue-500 font-medium">⚡ 대상 창 전환 중... (HWND: ${newHwnd})</span>`;
+
+        // Clear canvas to prevent frame leakage from previous window
+        const cvs = state.wgcCanvas || $('wgcCanvas');
+        if (cvs) {
+            const ctx = cvs.getContext('2d');
+            ctx.clearRect(0, 0, cvs.width, cvs.height);
+        }
+
+        const wsOpen = (typeof WebSocket !== 'undefined' && WebSocket.OPEN !== undefined) ? WebSocket.OPEN : 1;
+        if (state.wgcWs && (state.wgcWs.readyState === wsOpen || state.wgcWs.readyState === 1)) {
+            state.wgcWs.send(JSON.stringify({
+                action: 'switch_target',
+                target: newHwnd
+            }));
+        } else if (state.httpFallbackActive) {
+            try {
+                const res = await fetch('/api/capture/switch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ target: newHwnd })
+                });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    toast(`창 전환 실패: ${data.detail?.message || data.error || '대상 창을 찾을 수 없습니다.'}`, true);
+                    stopOps();
+                } else {
+                    toast(`대상 창 전환 완료: ${data.targetTitle || '선택 창'}`);
+                }
+            } catch (e) {
+                toast(`창 전환 요청 실패: ${e.message}`, true);
+                stopOps();
+            }
+        }
+    };
+    window.switchWgcTarget = switchWgcTarget;
 
     // --- Native WGC Window Enumeration & Tab Controls ---
     const refreshWgcWindows = async () => {
@@ -445,7 +503,7 @@
             if (res.ok) {
                 const data = await res.json();
                 const windows = data.windows || [];
-                const currentVal = sel.value;
+                const currentVal = state.wgcTargetHwnd || sel.value;
                 sel.innerHTML = '<option value="0">🖥️ 전체 데스크톱 (Screen Desktop)</option>';
                 windows.forEach(w => {
                     const opt = document.createElement('option');
@@ -454,7 +512,7 @@
                     opt.textContent = `🎮 [${w.process_name}] ${cleanTitle} (${w.width}x${w.height})`;
                     sel.appendChild(opt);
                 });
-                if (currentVal && Array.from(sel.options).some(o => o.value === currentVal)) {
+                if (currentVal && Array.from(sel.options).some(o => String(o.value) === String(currentVal))) {
                     sel.value = currentVal;
                 }
             }
@@ -498,6 +556,7 @@
     if ($('tabSourceWgc')) $('tabSourceWgc').onclick = () => setCaptureMode('wgc');
     if ($('tabSourceWebRTC')) $('tabSourceWebRTC').onclick = () => setCaptureMode('webrtc');
     if ($('btnRefreshWindows')) $('btnRefreshWindows').onclick = refreshWgcWindows;
+    if ($('selWgcWindow')) $('selWgcWindow').onchange = (e) => switchWgcTarget(e.target.value);
 
     // --- Native WGC Capture Multi-Protocol Connection & HTTP Fallback ---
     const startHttpFallbackCapture = async (targetHwnd) => {
@@ -734,6 +793,16 @@
                                 toast("네이티브 WGC 캡처 연결 성공");
                                 $('statusTxt').innerHTML = '<span class="text-blue-500 font-bold">⚡ 네이티브 WGC 세션 확립... 프레임 수신 대기 중</span>';
                             }
+                        } else if (msg.type === 'switch_response') {
+                            if (!msg.data || !msg.data.success) {
+                                toast(`네이티브 창 전환 실패: ${msg.data?.error || msg.data?.message || '대상 창을 찾을 수 없습니다.'}`, true);
+                                stopOps();
+                            } else {
+                                toast(`대상 창 전환 완료: ${msg.data.targetTitle || '선택 창'}`);
+                                $('statusTxt').innerHTML = `<span class="text-blue-500 font-bold">⚡ 대상 창 전환됨: ${msg.data.targetTitle || '선택 창'}</span>`;
+                            }
+                        } else if (msg.type === 'target_switched') {
+                            console.log(`[WGC] Target switched notification: HWND ${msg.targetHwnd}`);
                         }
                     } catch (err) {
                         console.warn("WGC WS text parse error:", err);
@@ -806,6 +875,136 @@
     };
     window.connectNativeWgc = connectNativeWgc;
 
+    // --- WebRTC Screen Capture Connection ---
+    const connectWebRtc = async () => {
+        if (state.isConnectingWebRtc) {
+            console.warn("[WebRTC] Connection already in progress, ignoring duplicate call.");
+            return;
+        }
+        state.isConnectingWebRtc = true;
+
+        try {
+            if (state.stream) {
+                state.stream.getTracks().forEach(t => t.stop());
+                state.stream = null;
+            }
+
+            // Display media options with recursion guard to avoid infinite hall-of-mirrors freeze
+            const displayMediaOptions = {
+                video: {
+                    cursor: "always",
+                    displaySurface: "window"
+                },
+                audio: false,
+                selfBrowserSurface: "exclude"
+            };
+
+            if (!navigator || !navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+                toast("현재 환경에서는 WebRTC 화면 공유를 지원하지 않습니다.", true);
+                stopOps();
+                return;
+            }
+
+            let stream;
+            try {
+                stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+            } catch (constraintErr) {
+                // Fallback for browsers not supporting selfBrowserSurface / displaySurface constraints
+                stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+            }
+
+            if (!stream) {
+                toast("화면 공유 스트림을 가져오지 못했습니다.", true);
+                return;
+            }
+
+            state.stream = stream;
+            const vid = $('vid');
+            if (!vid) {
+                toast("비디오 요소를 찾을 수 없습니다.", true);
+                stopOps();
+                return;
+            }
+
+            // Clean up previous event listeners on vid
+            vid.onloadedmetadata = null;
+            vid.oncanplay = null;
+            vid.onplaying = null;
+
+            vid.autoplay = true;
+            vid.playsInline = true;
+            vid.muted = true;
+            vid.srcObject = stream;
+
+            // Safe play() with rejection guard to prevent browser pipeline stalls
+            try {
+                if (typeof vid.play === 'function') {
+                    const playPromise = vid.play();
+                    if (playPromise !== undefined) {
+                        await playPromise.catch(playErr => {
+                            console.warn("[WebRTC] vid.play() interrupted or rejected:", playErr);
+                        });
+                    }
+                }
+            } catch (playErr) {
+                console.warn("[WebRTC] vid.play() caught exception:", playErr);
+            }
+
+            const track = stream.getVideoTracks()[0];
+            if (track) {
+                track.onended = () => {
+                    console.log("[WebRTC] Stream track ended by user/system.");
+                    stopOps();
+                };
+            }
+
+            $('overlayStandby').style.display = 'none';
+            const btnShare = $('btnShare');
+            if (btnShare && btnShare.querySelector('span')) {
+                btnShare.querySelector('span').innerText = "연결 해제";
+            }
+
+            // Frame-driven UI exposure: wait for actual video dimensions & readyState >= 2 before enabling start
+            state.webrtcReady = false;
+            const checkVideoReady = () => {
+                if (vid.videoWidth > 0 && vid.videoHeight > 0 && (vid.readyState === undefined || vid.readyState >= 2)) {
+                    const vw = vid.videoWidth;
+                    const vh = vid.videoHeight;
+                    $('resolutionInfo').innerText = `해상도: ${vw}x${vh} (WebRTC 원본 유지)`;
+                    $('btnStart').classList.remove('hidden');
+                    state.webrtcReady = true;
+                    if (!state.isRunning) {
+                        $('statusTxt').innerHTML = '<span class="text-emerald-500 font-bold">🌐 WebRTC 연결됨 (화면 공유 활성)</span>';
+                    }
+                    return true;
+                }
+                return false;
+            };
+
+            if (!checkVideoReady()) {
+                vid.onloadedmetadata = checkVideoReady;
+                vid.oncanplay = checkVideoReady;
+                vid.onplaying = checkVideoReady;
+            }
+
+            if (chkHide && chkHide.checked) {
+                updateConcealState(true);
+            }
+            toast("WebRTC 화면 공유가 연결되었습니다.");
+        } catch (err) {
+            if (err.name === 'NotAllowedError' || err.name === 'AbortError') {
+                toast("화면 공유가 취소되었습니다.", true);
+            } else {
+                console.error("[WebRTC] Screen share failed:", err);
+                toast(`화면 공유 오류: ${err.message}`, true);
+            }
+            stopOps();
+        } finally {
+            state.isConnectingWebRtc = false;
+        }
+    };
+    window.connectWebRtc = connectWebRtc;
+
     // --- Screen Share / Operation Control ---
     $('btnShare').onclick = async () => {
         if (state.captureMode === 'wgc') {
@@ -821,26 +1020,8 @@
         } else {
             // WebRTC Mode
             if (!state.stream) {
-                try {
-                    state.stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-                    $('vid').srcObject = state.stream;
-                    $('overlayStandby').style.display = 'none';
-                    $('btnShare').querySelector('span').innerText = "연결 해제";
-                    $('btnStart').classList.remove('hidden');
-
-                    const track = state.stream.getVideoTracks()[0];
-                    track.onended = stopOps;
-
-                    $('vid').onloadedmetadata = () => {
-                        const vw = $('vid').videoWidth;
-                        const vh = $('vid').videoHeight;
-                        $('resolutionInfo').innerText = `해상도: ${vw}x${vh} (원본 유지)`;
-                    };
-                } catch (e) {
-                    toast("화면 공유 취소됨", true);
-                }
+                await connectWebRtc();
             } else {
-                state.stream.getTracks().forEach(t => t.stop());
                 stopOps();
             }
         }
@@ -850,6 +1031,8 @@
         state.wgcSessionGen = (state.wgcSessionGen || 0) + 1;
         state.isRunning = false;
         state.isInferenceInFlight = false;
+        state.isConnectingWebRtc = false;
+        state.webrtcReady = false;
         clearTimeout(state.timer);
         clearTimeout(state.wsRetryTimer);
         clearTimeout(state.fallbackTimer);
@@ -899,7 +1082,15 @@
         }
 
         const vid = $('vid');
-        if (vid) vid.srcObject = null;
+        if (vid) {
+            vid.onloadedmetadata = null;
+            vid.oncanplay = null;
+            vid.onplaying = null;
+            try {
+                if (typeof vid.pause === 'function') vid.pause();
+            } catch (e) {}
+            vid.srcObject = null;
+        }
         const overlayStandby = $('overlayStandby');
         if (overlayStandby) overlayStandby.style.display = 'flex';
         const btnShare = $('btnShare');

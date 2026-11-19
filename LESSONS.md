@@ -28,20 +28,43 @@
   - 실행 버튼의 노출은 반드시 실제 소비 가능한 데이터(비디오 프레임)가 도착하여 캔버스에 렌더링된 이후에만 수행해야 한다.
   - 리소스 해제(`stopOps`) 시 클라이언트 이벤트 핸들러만 정리하지 말고 백엔드 캡처 중단 API(`/api/capture/stop`)를 명시적으로 호출하여 백그라운드 스레드 누수를 방지하라.
 
+### 사례 4: 동적 창 전환 누락 및 비재진입 Lock 자기 데드락
+- **결함 현상**: 프런트엔드 드롭다운(`selWgcWindow`)에서 대상 창을 변경해도 전환되지 않거나, 실행 중 전환 시 스레드가 멈춤.
+- **원인**:
+  1. UI의 `selWgcWindow`에 `onchange` 이벤트 핸들러 및 전환 API 연동 부재.
+  2. `CaptureService` 내 `self._lock`이 비재진입 `threading.Lock()`으로 선언되어 있어, `switch_target` 락 블록 내부에서 `_dispatch_control_to_queues`를 호출할 때 동일 스레드 상에서 락을 재획득하려다 즉각적인 자기 데드락(Self-Deadlock) 발생.
+- **교훈**:
+  - 다중 내부 헬퍼를 경유하는 동기화 클래스는 반드시 `threading.RLock()`(재진입 락)을 사용해야 한다.
+  - 대상 창을 전환할 때는 이전 창의 잔류 프레임이 유출되지 않도록 캐시(`_latest_image`, `_latest_jpeg`)를 즉시 파기해야 하며, 대상이 부재할 때는 이전 창으로 조용히 돌아가지 말고 명시적으로 오류(`target_window_not_found`)를 선고해야 한다.
+
+### 사례 5: WebRTC 크롬 브라우저 무한 거울 렌더링 및 미디어 파이프라인 정지
+- **결함 현상**: WebRTC 화면 공유를 켜는 순간 크롬 브라우저 전체가 응답 없음(Freeze) 상태에 빠짐.
+- **원인**:
+  1. `getDisplayMedia` 제약 조건에 `selfBrowserSurface: "exclude"`가 누락되어 사용자가 현재 탭/화면을 선택했을 때 비디오 엘리먼트와 화면 간의 무한 재귀 미러링(무한 거울 루프)이 발생하여 GPU/컴포지터 프로세스 포화.
+  2. `vid.play()` 호출 누락 또는 프로미스 거절(Promise Rejection) 미처리로 비디오 디코더 큐 스톨.
+  3. 프런트엔드 `btnShare` 연속 클릭에 대한 재귀 락 부재로 중복 `getDisplayMedia` 시스템 프롬프트 충돌.
+- **교훈**:
+  - WebRTC 화면 공유는 항상 `isConnectingWebRtc` 재귀 락으로 보호하고, `selfBrowserSurface: "exclude"`로 탭 자기 참조 거울 루프를 원천 차단하라.
+  - `vid.play()`는 거절 예외를 안전하게 가드하고, 비디오 디코딩 완료(`readyState >= 2`, 치수 > 0) 후에만 작전 버튼을 노출하라.
+
 ---
 
-## 2. 5대 안티 결함 엔지니어링 불변식 (5 Anti-Defect Engineering Invariants)
+## 2. 7대 안티 결함 엔지니어링 불변식 (7 Anti-Defect Engineering Invariants)
 
 1. **[Invariant 1] 배치 블록 내 괄호 금지**:
    - `if (...)` / `for (...)` 내부에는 원시 소괄호 `(` `)`를 절대 포함하지 않는다.
 2. **[Invariant 2] 대화형 실행 시 콘솔 닫힘 차단**:
    - 대화형(기본 더블클릭) 실행의 모든 종료 경로(정상/기실행/에러)에서 `pause >nul`을 통해 사용자가 종료를 확인하도록 보장한다.
 3. **[Invariant 3] 프레임 주도 UI 노출 원칙**:
-   - 백엔드 캡처 서비스 세션 확립뿐만 아니라 실제 첫 유효 프레임이 디코딩되어 `state.wgcReady = true`가 확립되기 전에는 실행 버튼을 절대 노출하지 않는다.
+   - 백엔드 캡처 서비스 세션 확립뿐만 아니라 실제 첫 유효 프레임이 디코딩되어 `state.wgcReady = true` (또는 `state.webrtcReady = true`)가 확립되기 전에는 실행 버튼을 절대 노출하지 않는다.
 4. **[Invariant 4] 실제 프로세스 스모크 테스트 의무화**:
    - 런처와 스크립트는 실제 `cmd.exe` 및 `subprocess` 구동 테스트를 필수로 수행한다.
 5. **[Invariant 5] 웹소켓 단절 시 자동 폴백**:
    - 일시적 네트워크 장애 또는 웹소켓 순단 시 즉각 종료하지 않고 HTTP 스트림 프로토콜로 자동 복구한다.
+6. **[Invariant 6] 동기화 서비스 재진입 락 및 캐시 정화**:
+   - 캡처 조율 서비스는 `threading.RLock()`을 사용하여 자기 데드락을 방지하고, 타겟 전환 시 이전 프레임 캐시를 즉각 정화하여 프레임 유출을 차단한다.
+7. **[Invariant 7] WebRTC 거울 루프 및 재귀 차단**:
+   - WebRTC 화면 공유는 `selfBrowserSurface: "exclude"`와 `isConnectingWebRtc` 플래그로 보호하여 크롬 프리징을 원천 차단한다.
 
 ---
 
