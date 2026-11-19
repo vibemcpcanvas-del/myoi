@@ -1138,6 +1138,7 @@
 
         state.wgcReady = false;
         state.wgcStalled = false;
+        state.isDecodingFrame = false;
         const concealOverlay = $('streamConcealOverlay');
         if (concealOverlay) concealOverlay.style.display = 'none';
 

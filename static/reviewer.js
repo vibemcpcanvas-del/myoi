@@ -47,6 +47,8 @@
 
             // Session Persistence & Historical Retrieval State
             this.maxInMemoryRecords = 50; // Bounded rolling FIFO buffer limit
+            this.unpersistedEvicted = [];
+            this.pendingSaveRequested = false;
             this.currentSessionId = null;
             this.isSavingSession = false;
             this.autoSaveTimer = null;
@@ -329,17 +331,27 @@
         addRecord(record) {
             this.records.push(record);
             if (this.maxInMemoryRecords && this.records.length > this.maxInMemoryRecords) {
-                // Ensure unsaved records being evicted are persisted to server disk first
-                const oldest = this.records[0];
-                if (oldest && !oldest._savedOnServer) {
-                    this.saveCurrentSessionToServer(true);
-                }
                 const evicted = this.records.shift();
                 if (evicted) {
-                    delete evicted.origBlob;
-                    delete evicted.prevBlob;
-                    delete evicted.origBase64;
-                    delete evicted.prevBase64;
+                    if (!evicted._savedOnServer) {
+                        if (!this.unpersistedEvicted) this.unpersistedEvicted = [];
+                        this.unpersistedEvicted.push(evicted);
+                        if (this.unpersistedEvicted.length > 50) {
+                            const dropped = this.unpersistedEvicted.shift();
+                            if (dropped) {
+                                delete dropped.origBlob;
+                                delete dropped.prevBlob;
+                                delete dropped.origBase64;
+                                delete dropped.prevBase64;
+                            }
+                        }
+                        this.saveCurrentSessionToServer(true);
+                    } else {
+                        delete evicted.origBlob;
+                        delete evicted.prevBlob;
+                        delete evicted.origBase64;
+                        delete evicted.prevBase64;
+                    }
                 }
                 if (this.currentRecordIndex > 0) {
                     this.currentRecordIndex--;
@@ -358,6 +370,8 @@
                 this.autoSaveTimer = null;
             }
             this.records = [];
+            this.unpersistedEvicted = [];
+            this.pendingSaveRequested = false;
             this.currentRecordIndex = -1;
             this.selectedBoxIndex = -1;
             this.resetView();
@@ -1276,14 +1290,33 @@
         }
 
         async saveCurrentSessionToServer(silent = false) {
-            if (this.isSavingSession) return;
+            if (this.isSavingSession) {
+                this.pendingSaveRequested = true;
+                return this.currentSavePromise;
+            }
+            this.currentSavePromise = (async () => {
+                this.isSavingSession = true;
+                try {
+                    while (true) {
+                        this.pendingSaveRequested = false;
+                        await this._doSaveSession(silent);
+                        if (!this.pendingSaveRequested) break;
+                    }
+                } finally {
+                    this.isSavingSession = false;
+                    this.currentSavePromise = null;
+                }
+            })();
+            return this.currentSavePromise;
+        }
+
+        async _doSaveSession(silent = false) {
             const sessId = this.currentSessionId || (window.AppState ? window.AppState.sessionId : 'SES_DEFAULT');
-            if (!this.records || this.records.length === 0) {
+            if ((!this.records || this.records.length === 0) && (!this.unpersistedEvicted || this.unpersistedEvicted.length === 0)) {
                 if (!silent) showAlert('저장할 프레임이 없습니다.');
                 return;
             }
 
-            this.isSavingSession = true;
             const btnSave = document.getElementById('btnSaveSession');
             if (btnSave && !silent) {
                 btnSave.classList.add('opacity-70', 'pointer-events-none');
@@ -1291,7 +1324,12 @@
             }
 
             try {
-                const payloadRecords = this.records.map(r => {
+                const recordsToSave = this.records.slice();
+                const sentRecordIds = new Set(recordsToSave.map(r => r.recordId));
+                const evictedToSave = (this.unpersistedEvicted || []).slice();
+                const allRecordsToSend = [...evictedToSave, ...recordsToSave];
+
+                const payloadRecords = allRecordsToSend.map(r => {
                     const copy = Object.assign({}, r);
                     if (r._savedOnServer && r.imageFile) {
                         delete copy.origBase64;
@@ -1326,13 +1364,19 @@
 
                 const resData = await res.json();
                 this.records.forEach(r => {
-                    r._savedOnServer = true;
-                    // Release redundant Blobs and heavy base64 strings once persisted to server disk
-                    delete r.origBlob;
-                    delete r.prevBlob;
-                    delete r.origBase64;
-                    delete r.prevBase64;
+                    if (sentRecordIds.has(r.recordId)) {
+                        r._savedOnServer = true;
+                        // Release redundant Blobs and heavy base64 strings once persisted to server disk
+                        delete r.origBlob;
+                        delete r.prevBlob;
+                        delete r.origBase64;
+                        delete r.prevBase64;
+                    }
                 });
+                if (this.unpersistedEvicted && this.unpersistedEvicted.length > 0) {
+                    const sentEvictedIds = new Set(evictedToSave.map(r => r.recordId));
+                    this.unpersistedEvicted = this.unpersistedEvicted.filter(r => !sentEvictedIds.has(r.recordId));
+                }
                 this.currentSessionId = sessId;
                 this.updateSessionBadge();
 
@@ -1350,7 +1394,6 @@
                     showAlert(`세션 저장 실패: ${err.message}`);
                 }
             } finally {
-                this.isSavingSession = false;
                 if (btnSave && !silent) {
                     btnSave.classList.remove('opacity-70', 'pointer-events-none');
                     btnSave.querySelector('span').innerText = '💾 세션 저장';

@@ -450,3 +450,200 @@ def test_reviewer_persisted_session_purges_heavy_base64_in_node():
     res = subprocess.run([node_bin, "-e", node_script], capture_output=True, text=True, timeout=10)
     assert res.returncode == 0, f"Node.js base64 purge test failed: {res.stderr} / {res.stdout}"
     assert "PURGE_HEAVY_BASE64_PASS" in res.stdout
+
+
+def test_reviewer_concurrent_record_arrival_during_save_preserves_payload():
+    """Verify that records added while an async save is in flight DO NOT have their base64 deleted prematurely."""
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js binary not available")
+
+    node_script = f"""
+    const fs = require('fs');
+    const reviewerCode = fs.readFileSync({repr(str(REVIEWER_JS))}, 'utf8');
+
+    global.window = {{ addEventListener: () => {{}}, removeEventListener: () => {{}} }};
+    global.document = {{
+        addEventListener: () => {{}}, removeEventListener: () => {{}},
+        getElementById: (id) => ({{
+            innerText: '', className: '', style: {{}},
+            classList: {{ add: () => {{}}, remove: () => {{}}, toggle: () => {{}}, contains: () => false }},
+            querySelector: () => ({{ innerText: '' }}),
+            getContext: () => ({{ save: () => {{}}, restore: () => {{}}, setTransform: () => {{}}, clearRect: () => {{}} }}),
+            getBoundingClientRect: () => ({{ left: 0, top: 0, width: 640, height: 360 }}),
+            addEventListener: () => {{}}, removeEventListener: () => {{}},
+            width: 1280, height: 720
+        }})
+    }};
+    global.Image = function() {{ this.onload = null; this.onerror = null; }};
+
+    let savedPayloads = [];
+    let resolveFirstFetch = null;
+    let fetchCount = 0;
+
+    global.fetch = (url, opts) => {{
+        fetchCount++;
+        const currentCount = fetchCount;
+        savedPayloads.push(JSON.parse(opts.body));
+        if (currentCount === 1) {{
+            return new Promise(resolve => {{
+                resolveFirstFetch = () => resolve({{
+                    ok: true,
+                    json: () => Promise.resolve({{ success: true }})
+                }});
+            }});
+        }}
+        return Promise.resolve({{
+            ok: true,
+            json: () => Promise.resolve({{ success: true }})
+        }});
+    }};
+
+    eval(reviewerCode);
+    const rm = new global.window.ReviewManager();
+
+    rm.addRecord({{
+        recordId: 'rec_first',
+        sessionId: 'SES_RACE',
+        origBase64: 'data:image/jpeg;base64,first_img',
+        detections: []
+    }});
+
+    // Initiate first save (hangs until resolveFirstFetch is called)
+    const savePromise = rm.saveCurrentSessionToServer(true);
+
+    // Concurrently add a second record while first save is in-flight
+    rm.addRecord({{
+        recordId: 'rec_second_in_flight',
+        sessionId: 'SES_RACE',
+        origBase64: 'data:image/jpeg;base64,second_img_payload',
+        detections: []
+    }});
+
+    // Resolve the first fetch
+    resolveFirstFetch();
+
+    savePromise.then(async () => {{
+        const rec1 = rm.records.find(r => r.recordId === 'rec_first');
+        const rec2 = rm.records.find(r => r.recordId === 'rec_second_in_flight');
+
+        // rec1 was in the first payload and should be marked saved and base64 purged
+        if (!rec1._savedOnServer || rec1.origBase64 !== undefined) {{
+            throw new Error("rec_first should be marked saved and have base64 purged");
+        }}
+
+        // rec2 was NOT in the first payload: it must NOT have its base64 deleted!
+        if (rec2._savedOnServer) {{
+            throw new Error("rec_second_in_flight should NOT be marked saved before its own save");
+        }}
+        if (!rec2.origBase64 || rec2.origBase64 !== 'data:image/jpeg;base64,second_img_payload') {{
+            throw new Error("rec_second_in_flight base64 was prematurely destroyed!");
+        }}
+
+        // Allow pending save to run and persist rec2
+        await rm.saveCurrentSessionToServer(true);
+        if (!rec2._savedOnServer || rec2.origBase64 !== undefined) {{
+            throw new Error("rec_second_in_flight should be saved and purged after second save cycle");
+        }}
+
+        console.log("RACE_SAFETY_PASS");
+    }}).catch(err => {{
+        console.error(err);
+        process.exit(1);
+    }});
+    """
+
+    res = subprocess.run([node_bin, "-e", node_script], capture_output=True, text=True, timeout=10)
+    assert res.returncode == 0, f"Node.js concurrent arrival safety test failed: {res.stderr} / {res.stdout}"
+    assert "RACE_SAFETY_PASS" in res.stdout
+
+
+def test_reviewer_evicted_unsaved_records_persisted_to_server():
+    """Verify that unsaved records evicted due to FIFO cap are preserved and sent in the server save payload."""
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js binary not available")
+
+    node_script = f"""
+    const fs = require('fs');
+    const reviewerCode = fs.readFileSync({repr(str(REVIEWER_JS))}, 'utf8');
+
+    global.window = {{ addEventListener: () => {{}}, removeEventListener: () => {{}} }};
+    global.document = {{
+        addEventListener: () => {{}}, removeEventListener: () => {{}},
+        getElementById: (id) => ({{
+            innerText: '', className: '', style: {{}},
+            classList: {{ add: () => {{}}, remove: () => {{}}, toggle: () => {{}}, contains: () => false }},
+            querySelector: () => ({{ innerText: '' }}),
+            getContext: () => ({{ save: () => {{}}, restore: () => {{}}, setTransform: () => {{}}, clearRect: () => {{}} }}),
+            getBoundingClientRect: () => ({{ left: 0, top: 0, width: 640, height: 360 }}),
+            addEventListener: () => {{}}, removeEventListener: () => {{}},
+            width: 1280, height: 720
+        }})
+    }};
+    global.Image = function() {{ this.onload = null; this.onerror = null; }};
+
+    let allSavedRecords = [];
+    global.fetch = (url, opts) => {{
+        const body = JSON.parse(opts.body);
+        allSavedRecords = allSavedRecords.concat(body.records);
+        return Promise.resolve({{
+            ok: true,
+            json: () => Promise.resolve({{ success: true, count: body.records.length }})
+        }});
+    }};
+
+    eval(reviewerCode);
+    const rm = new global.window.ReviewManager();
+    rm.maxInMemoryRecords = 10; // set small limit to test eviction
+
+    // Push 15 records rapidly before save
+    for (let i = 0; i < 15; i++) {{
+        rm.addRecord({{
+            recordId: `rec_${{i}}`,
+            sessionId: 'SES_EVICT',
+            imageFile: `images/rec_${{i}}_orig.jpg`,
+            origBase64: `data:image/jpeg;base64,payload_${{i}}`,
+            detections: []
+        }});
+    }}
+
+    // In-memory records capped at 10
+    if (rm.records.length !== 10) {{
+        throw new Error(`Expected 10 records in memory, got ${{rm.records.length}}`);
+    }}
+
+    // 5 records (rec_0..rec_4) were evicted from memory buffer
+    if (rm.records[0].recordId !== 'rec_5') {{
+        throw new Error(`Expected oldest memory record to be rec_5, got ${{rm.records[0].recordId}}`);
+    }}
+
+    // Execute save
+    rm.saveCurrentSessionToServer(true).then(() => {{
+        // Verify all 15 records were sent to server without dropping evicted ones
+        const savedIds = new Set(allSavedRecords.map(r => r.recordId));
+        for (let i = 0; i < 15; i++) {{
+            if (!savedIds.has(`rec_${{i}}`)) {{
+                throw new Error(`Evicted record rec_${{i}} was lost and never sent to server!`);
+            }}
+        }}
+        console.log("EVICTION_PERSISTENCE_PASS");
+    }}).catch(err => {{
+        console.error(err);
+        process.exit(1);
+    }});
+    """
+
+    res = subprocess.run([node_bin, "-e", node_script], capture_output=True, text=True, timeout=10)
+    assert res.returncode == 0, f"Node.js evicted persistence test failed: {res.stderr} / {res.stdout}"
+    assert "EVICTION_PERSISTENCE_PASS" in res.stdout
+
+
+def test_advisor_hook_gpt62sol_pinned_as_primary():
+    """Verify C:/Users/ROCmAdmin/tes/advisor_hook.py has GPT-6.2-sol pinned as primary model."""
+    advisor_hook_path = Path(r"C:\Users\ROCmAdmin\tes\advisor_hook.py")
+    assert advisor_hook_path.exists(), f"advisor_hook.py not found at {advisor_hook_path}"
+    content = advisor_hook_path.read_text(encoding="utf-8")
+    assert 'canonical_id="gpt-6-2-sol"' in content
+    assert 'display_name="GPT-6.2-sol"' in content
+
