@@ -450,6 +450,11 @@
         state.wgcTargetHwnd = newHwnd;
         state.wgcHwnd = newHwnd;
 
+        const sel = $('selWgcWindow') || $('wgcWindowSelect');
+        if (sel && String(sel.value) !== String(newHwnd)) {
+            sel.value = String(newHwnd);
+        }
+
         const isConnected = !!(state.wgcWs || state.httpFallbackActive);
         if (!isConnected) {
             return;
@@ -461,9 +466,9 @@
 
         // Clear canvas to prevent frame leakage from previous window
         const cvs = state.wgcCanvas || $('wgcCanvas');
-        if (cvs) {
+        if (cvs && typeof cvs.getContext === 'function') {
             const ctx = cvs.getContext('2d');
-            ctx.clearRect(0, 0, cvs.width, cvs.height);
+            if (ctx) ctx.clearRect(0, 0, cvs.width, cvs.height);
         }
 
         const wsOpen = (typeof WebSocket !== 'undefined' && WebSocket.OPEN !== undefined) ? WebSocket.OPEN : 1;
@@ -472,6 +477,8 @@
                 action: 'switch_target',
                 target: newHwnd
             }));
+        } else if (state.wgcWs && state.wgcWs.readyState === 0) {
+            console.log("[WGC] WebSocket connecting; target HWND queued:", newHwnd);
         } else if (state.httpFallbackActive) {
             try {
                 const res = await fetch('/api/capture/switch', {
@@ -496,14 +503,14 @@
 
     // --- Native WGC Window Enumeration & Tab Controls ---
     const refreshWgcWindows = async () => {
-        const sel = $('selWgcWindow');
+        const sel = $('selWgcWindow') || $('wgcWindowSelect');
         if (!sel) return;
         try {
             const res = await fetch('/api/capture/windows');
             if (res.ok) {
                 const data = await res.json();
                 const windows = data.windows || [];
-                const currentVal = state.wgcTargetHwnd || sel.value;
+                const currentVal = (state.wgcTargetHwnd !== undefined && state.wgcTargetHwnd !== null) ? state.wgcTargetHwnd : sel.value;
                 sel.innerHTML = '<option value="0">🖥️ 전체 데스크톱 (Screen Desktop)</option>';
                 windows.forEach(w => {
                     const opt = document.createElement('option');
@@ -512,7 +519,7 @@
                     opt.textContent = `🎮 [${w.process_name}] ${cleanTitle} (${w.width}x${w.height})`;
                     sel.appendChild(opt);
                 });
-                if (currentVal && Array.from(sel.options).some(o => String(o.value) === String(currentVal))) {
+                if (currentVal !== undefined && Array.from(sel.options).some(o => String(o.value) === String(currentVal))) {
                     sel.value = currentVal;
                 }
             }
@@ -523,7 +530,7 @@
     window.refreshWgcWindows = refreshWgcWindows;
 
     const setCaptureMode = (mode) => {
-        if (state.isRunning || state.stream || state.wgcWs || state.httpFallbackActive) {
+        if (state.isRunning || state.stream || state.wgcWs || state.httpFallbackActive || state.isConnectingWebRtc) {
             stopOps();
         }
         state.captureMode = mode;
@@ -556,7 +563,8 @@
     if ($('tabSourceWgc')) $('tabSourceWgc').onclick = () => setCaptureMode('wgc');
     if ($('tabSourceWebRTC')) $('tabSourceWebRTC').onclick = () => setCaptureMode('webrtc');
     if ($('btnRefreshWindows')) $('btnRefreshWindows').onclick = refreshWgcWindows;
-    if ($('selWgcWindow')) $('selWgcWindow').onchange = (e) => switchWgcTarget(e.target.value);
+    const selWgcElem = $('selWgcWindow') || $('wgcWindowSelect');
+    if (selWgcElem) selWgcElem.onchange = (e) => switchWgcTarget(e.target.value);
 
     // --- Native WGC Capture Multi-Protocol Connection & HTTP Fallback ---
     const startHttpFallbackCapture = async (targetHwnd) => {
@@ -746,7 +754,7 @@
 
                 ws.send(JSON.stringify({
                     action: 'start',
-                    target: targetHwnd,
+                    target: (state.wgcTargetHwnd !== undefined && state.wgcTargetHwnd !== null) ? state.wgcTargetHwnd : targetHwnd,
                     fps: 20,
                     quality: 85
                 }));
@@ -896,7 +904,9 @@
                     displaySurface: "window"
                 },
                 audio: false,
-                selfBrowserSurface: "exclude"
+                selfBrowserSurface: "exclude",
+                surfaceSwitching: "exclude",
+                systemAudio: "exclude"
             };
 
             if (!navigator || !navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
@@ -909,8 +919,20 @@
             try {
                 stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
             } catch (constraintErr) {
+                // If user cancelled (NotAllowedError / AbortError), do not re-prompt with fallback
+                if (constraintErr.name === 'NotAllowedError' || constraintErr.name === 'AbortError') {
+                    throw constraintErr;
+                }
                 // Fallback for browsers not supporting selfBrowserSurface / displaySurface constraints
                 stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+            }
+
+            // If user switched mode away from WebRTC while screen-share dialog was open, discard stream immediately
+            if (state.captureMode !== 'webrtc') {
+                if (stream) {
+                    stream.getTracks().forEach(t => t.stop());
+                }
+                return;
             }
 
             if (!stream) {
@@ -968,6 +990,9 @@
             state.webrtcReady = false;
             const checkVideoReady = () => {
                 if (vid.videoWidth > 0 && vid.videoHeight > 0 && (vid.readyState === undefined || vid.readyState >= 2)) {
+                    vid.onloadedmetadata = null;
+                    vid.oncanplay = null;
+                    vid.onplaying = null;
                     const vw = vid.videoWidth;
                     const vh = vid.videoHeight;
                     $('resolutionInfo').innerText = `해상도: ${vw}x${vh} (WebRTC 원본 유지)`;
@@ -1105,7 +1130,16 @@
         $('alertBanner').style.opacity = '0';
 
         const cvs = $('cvs');
-        if (cvs) cvs.getContext('2d').clearRect(0, 0, cvs.width, cvs.height);
+        if (cvs && typeof cvs.getContext === 'function') {
+            const ctx = cvs.getContext('2d');
+            if (ctx) ctx.clearRect(0, 0, cvs.width, cvs.height);
+        }
+
+        const wgcCanvas = state.wgcCanvas || $('wgcCanvas');
+        if (wgcCanvas && typeof wgcCanvas.getContext === 'function') {
+            const wgcCtx = wgcCanvas.getContext('2d');
+            if (wgcCtx) wgcCtx.clearRect(0, 0, wgcCanvas.width, wgcCanvas.height);
+        }
     };
     window.stopOps = stopOps;
 
@@ -1135,7 +1169,16 @@
         $('videoWrap').classList.remove('alert');
         $('alertBanner').style.opacity = '0';
         const cvs = $('cvs');
-        if (cvs) cvs.getContext('2d').clearRect(0, 0, cvs.width, cvs.height);
+        if (cvs && typeof cvs.getContext === 'function') {
+            const ctx = cvs.getContext('2d');
+            if (ctx) ctx.clearRect(0, 0, cvs.width, cvs.height);
+        }
+
+        const wgcCanvas = state.wgcCanvas || $('wgcCanvas');
+        if (wgcCanvas && typeof wgcCanvas.getContext === 'function') {
+            const wgcCtx = wgcCanvas.getContext('2d');
+            if (wgcCtx) wgcCtx.clearRect(0, 0, wgcCanvas.width, wgcCanvas.height);
+        }
     };
     window.stopOps = stopOps;
 

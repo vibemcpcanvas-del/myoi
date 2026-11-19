@@ -171,7 +171,7 @@ class CaptureService:
             self._dispatch_control_to_queues({
                 "type": "target_switched",
                 "targetHwnd": target_hwnd,
-                "targetTitle": target_info.title if target_info else "전체 데스크톱",
+                "targetTitle": target_info.title if target_info else (f"HWND {target_hwnd}" if target_hwnd != 0 else "전체 데스크톱"),
                 "seq_id": self._telemetry.seq_id,
                 "timestamp": time.time(),
             })
@@ -179,7 +179,7 @@ class CaptureService:
         return {
             "success": True,
             "targetHwnd": self._target_hwnd,
-            "targetTitle": target_info.title if target_info else "전체 데스크톱",
+            "targetTitle": target_info.title if target_info else (f"HWND {self._target_hwnd}" if self._target_hwnd != 0 else "전체 데스크톱"),
             "fps": self._target_fps,
             "state": CaptureState.CAPTURING.value,
         }

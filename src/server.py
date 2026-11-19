@@ -641,7 +641,7 @@ async def start_capture_endpoint(request: Request) -> Dict[str, Any]:
     result = capture_svc.start_capture(target=target, fps=fps, quality=quality)
     if not result.get("success"):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_404_NOT_FOUND if result.get("error") == "target_window_not_found" else status.HTTP_400_BAD_REQUEST,
             detail=result,
         )
     return result
