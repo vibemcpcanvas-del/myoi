@@ -46,6 +46,7 @@
             this.imgElement = new Image();
 
             // Session Persistence & Historical Retrieval State
+            this.maxInMemoryRecords = 50; // Bounded rolling FIFO buffer limit
             this.currentSessionId = null;
             this.isSavingSession = false;
             this.autoSaveTimer = null;
@@ -327,6 +328,23 @@
 
         addRecord(record) {
             this.records.push(record);
+            if (this.maxInMemoryRecords && this.records.length > this.maxInMemoryRecords) {
+                // Ensure unsaved records being evicted are persisted to server disk first
+                const oldest = this.records[0];
+                if (oldest && !oldest._savedOnServer) {
+                    this.saveCurrentSessionToServer(true);
+                }
+                const evicted = this.records.shift();
+                if (evicted) {
+                    delete evicted.origBlob;
+                    delete evicted.prevBlob;
+                    delete evicted.origBase64;
+                    delete evicted.prevBase64;
+                }
+                if (this.currentRecordIndex > 0) {
+                    this.currentRecordIndex--;
+                }
+            }
             this.updateCounts();
             if (this.currentRecordIndex === -1) {
                 this.currentRecordIndex = 0;
@@ -400,7 +418,14 @@
                 const statusColor = rec.reviewStatus === 'approved' ? 'bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300' :
                                     rec.reviewStatus === 'rejected' ? 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300' : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300';
                 const statusLabel = rec.reviewStatus === 'approved' ? '승인' : rec.reviewStatus === 'rejected' ? '제외' : '대기';
-                const imgSrc = rec.prevBase64 || rec.origBase64;
+                const activeSession = rec.sessionId || this.currentSessionId;
+                let imgSrc = (this.viewMode === 'prev' && rec.prevBase64) ? rec.prevBase64 : (rec.prevBase64 || rec.origBase64);
+                if (!imgSrc && activeSession) {
+                    const targetFile = rec.previewFile || rec.imageFile;
+                    if (targetFile) {
+                        imgSrc = `/api/sessions/${encodeURIComponent(activeSession)}/images/${encodeURIComponent(targetFile)}`;
+                    }
+                }
                 const timeStr = rec.capturedAtUtc ? rec.capturedAtUtc.split('T')[1].slice(0, 8) : '00:00:00';
 
                 return `
@@ -488,8 +513,12 @@
 
             const targetIndex = this.currentRecordIndex;
             let imgSrc = (this.viewMode === 'prev' && rec.prevBase64) ? rec.prevBase64 : rec.origBase64;
-            if (!imgSrc && rec.imageFile && this.currentSessionId) {
-                imgSrc = `/api/sessions/${encodeURIComponent(this.currentSessionId)}/images/${encodeURIComponent(rec.imageFile)}`;
+            const activeSession = rec.sessionId || this.currentSessionId;
+            if (!imgSrc && activeSession) {
+                const targetFile = (this.viewMode === 'prev' && rec.previewFile) ? rec.previewFile : (rec.imageFile || rec.previewFile);
+                if (targetFile) {
+                    imgSrc = `/api/sessions/${encodeURIComponent(activeSession)}/images/${encodeURIComponent(targetFile)}`;
+                }
             }
 
             if (imgSrc === '' || (typeof imgSrc === 'string' && imgSrc.startsWith('data:') && imgSrc.includes(',') && imgSrc.split(',')[1].trim() === '')) {
@@ -1296,7 +1325,14 @@
                 }
 
                 const resData = await res.json();
-                this.records.forEach(r => { r._savedOnServer = true; });
+                this.records.forEach(r => {
+                    r._savedOnServer = true;
+                    // Release redundant Blobs and heavy base64 strings once persisted to server disk
+                    delete r.origBlob;
+                    delete r.prevBlob;
+                    delete r.origBase64;
+                    delete r.prevBase64;
+                });
                 this.currentSessionId = sessId;
                 this.updateSessionBadge();
 

@@ -715,7 +715,7 @@ async def get_capture_frame_endpoint():
 
 async def _mjpeg_stream_generator(capture_svc: CaptureService):
     """Asynchronous generator streaming live JPEG frames with multipart boundary."""
-    queue: asyncio.Queue = asyncio.Queue(maxsize=3)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
     capture_svc.register_async_queue(queue)
     try:
         while True:
@@ -781,7 +781,7 @@ async def websocket_stream_endpoint(websocket: WebSocket):
     await websocket.accept()
     cfg = get_config()
     capture_svc = get_capture_service(mock_mode=cfg.mock_inference)
-    queue: asyncio.Queue = asyncio.Queue(maxsize=3)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
     capture_svc.register_async_queue(queue)
 
     async def sender_task():

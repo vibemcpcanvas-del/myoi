@@ -57,6 +57,14 @@
         wgcTargetHwnd: 0,
         isConnectingWebRtc: false,
         webrtcReady: false,
+        isDecodingFrame: false,
+        // Bounded collection data proxy
+        get collectedData() {
+            return (window.Reviewer && window.Reviewer.records) ? window.Reviewer.records : [];
+        },
+        set collectedData(val) {
+            if (window.Reviewer) window.Reviewer.records = val;
+        },
         // Offscreen canvases
         pCvs: document.createElement('canvas'), // 640x640 letterbox canvas for inference
         origCvs: document.createElement('canvas'), // full resolution clean original canvas
@@ -618,17 +626,29 @@
                         consecutiveHttpErrors = 0;
                         const blob = await frameRes.blob();
                         const bmp = await createImageBitmap(blob);
-                        const cvs = state.wgcCanvas || $('wgcCanvas');
-                        if (cvs) {
-                            if (cvs.width !== bmp.width || cvs.height !== bmp.height) {
-                                cvs.width = bmp.width;
-                                cvs.height = bmp.height;
-                                $('resolutionInfo').innerText = `해상도: ${bmp.width}x${bmp.height} (HTTP Fallback)`;
+                        try {
+                            const cvs = state.wgcCanvas || $('wgcCanvas');
+                            if (cvs) {
+                                const MAX_CANVAS_W = 1920;
+                                const MAX_CANVAS_H = 1080;
+                                let targetW = bmp.width;
+                                let targetH = bmp.height;
+                                if (targetW > MAX_CANVAS_W || targetH > MAX_CANVAS_H) {
+                                    const scale = Math.min(MAX_CANVAS_W / targetW, MAX_CANVAS_H / targetH);
+                                    targetW = Math.round(targetW * scale);
+                                    targetH = Math.round(targetH * scale);
+                                }
+                                if (cvs.width !== targetW || cvs.height !== targetH) {
+                                    cvs.width = targetW;
+                                    cvs.height = targetH;
+                                    $('resolutionInfo').innerText = `해상도: ${targetW}x${targetH} (${bmp.width}x${bmp.height} HTTP Fallback)`;
+                                }
+                                const ctx = cvs.getContext('2d');
+                                ctx.drawImage(bmp, 0, 0, targetW, targetH);
                             }
-                            const ctx = cvs.getContext('2d');
-                            ctx.drawImage(bmp, 0, 0);
+                        } finally {
+                            bmp.close();
                         }
-                        bmp.close();
                         state.wgcReady = true;
                         state.wgcStalled = false;
                         state.lastFrameArrival = Date.now();
@@ -819,29 +839,48 @@
                 }
 
                 // Binary Frame Processing
+                if (state.isDecodingFrame) {
+                    // Frame-dropping backpressure guard: discard frame if previous frame is still decoding
+                    return;
+                }
+                state.isDecodingFrame = true;
                 try {
                     const bmp = await createImageBitmap(e.data);
-                    const cvs = state.wgcCanvas || $('wgcCanvas');
-                    if (cvs) {
-                        if (cvs.width !== bmp.width || cvs.height !== bmp.height) {
-                            cvs.width = bmp.width;
-                            cvs.height = bmp.height;
-                            $('resolutionInfo').innerText = `해상도: ${bmp.width}x${bmp.height} (WGC 원본)`;
+                    try {
+                        const cvs = state.wgcCanvas || $('wgcCanvas');
+                        if (cvs) {
+                            const MAX_CANVAS_W = 1920;
+                            const MAX_CANVAS_H = 1080;
+                            let targetW = bmp.width;
+                            let targetH = bmp.height;
+                            if (targetW > MAX_CANVAS_W || targetH > MAX_CANVAS_H) {
+                                const scale = Math.min(MAX_CANVAS_W / targetW, MAX_CANVAS_H / targetH);
+                                targetW = Math.round(targetW * scale);
+                                targetH = Math.round(targetH * scale);
+                            }
+                            if (cvs.width !== targetW || cvs.height !== targetH) {
+                                cvs.width = targetW;
+                                cvs.height = targetH;
+                                $('resolutionInfo').innerText = `해상도: ${targetW}x${targetH} (${bmp.width}x${bmp.height} WGC)`;
+                            }
+                            const ctx = cvs.getContext('2d');
+                            ctx.drawImage(bmp, 0, 0, targetW, targetH);
                         }
-                        const ctx = cvs.getContext('2d');
-                        ctx.drawImage(bmp, 0, 0);
-                    }
-                    bmp.close();
-                    state.wgcReady = true;
-                    state.wgcStalled = false;
-                    state.lastFrameArrival = Date.now();
-                    $('overlayStandby').style.display = 'none';
-                    $('btnStart').classList.remove('hidden');
-                    if (!state.isRunning) {
-                        $('statusTxt').innerHTML = '<span class="text-emerald-500 font-bold">⚡ 네이티브 연결됨 (실시간 프레임 수신 중)</span>';
+                        state.wgcReady = true;
+                        state.wgcStalled = false;
+                        state.lastFrameArrival = Date.now();
+                        $('overlayStandby').style.display = 'none';
+                        $('btnStart').classList.remove('hidden');
+                        if (!state.isRunning) {
+                            $('statusTxt').innerHTML = '<span class="text-emerald-500 font-bold">⚡ 네이티브 연결됨 (실시간 프레임 수신 중)</span>';
+                        }
+                    } finally {
+                        bmp.close();
                     }
                 } catch (err) {
                     console.warn("WGC frame decode warning:", err);
+                } finally {
+                    state.isDecodingFrame = false;
                 }
             };
 
@@ -1489,7 +1528,6 @@
             const src = getFrameSource();
             const srcEl = src ? src.element : $('vid');
             origCtx.drawImage(srcEl, 0, 0, vw, vh);
-            const origBlob = await new Promise(r => state.origCvs.toBlob(r, 'image/jpeg', 0.95));
             const origBase64 = state.origCvs.toDataURL('image/jpeg', 0.95);
 
             // 2. Capture preview frame with boxes for review convenience
@@ -1510,7 +1548,6 @@
                 });
             });
 
-            const prevBlob = await new Promise(r => state.prevCvs.toBlob(r, 'image/jpeg', 0.85));
             const prevBase64 = state.prevCvs.toDataURL('image/jpeg', 0.85);
 
             const recId = `rec_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
@@ -1535,8 +1572,8 @@
                 reviewStatus: "pending",
                 reviewedAtUtc: null,
                 reviewerId: "Sensei",
-                origBlob: origBlob,
-                prevBlob: prevBlob,
+                origBlob: null,
+                prevBlob: null,
                 origBase64: origBase64,
                 prevBase64: prevBase64,
             };
@@ -1676,6 +1713,10 @@
     $('btnCancelExport').onclick = () => $('exportModal').classList.add('hidden');
 
     $('btnConfirmExport').onclick = async () => {
+        // Ensure unsaved session changes are persisted to disk so exporter disk fallback succeeds
+        if (window.Reviewer && typeof window.Reviewer.saveCurrentSessionToServer === 'function') {
+            await window.Reviewer.saveCurrentSessionToServer(true);
+        }
         const approved = window.Reviewer.records.filter(r => r.reviewStatus === 'approved');
         if (approved.length === 0) {
             toast("승인 완료된 프레임이 없습니다.", true);

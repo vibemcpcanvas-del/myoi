@@ -400,5 +400,5 @@ class NativeCaptureEngine:
     def encode_jpeg(img: Image.Image, quality: int = 80) -> bytes:
         """Encodes PIL Image to JPEG byte buffer."""
         out = io.BytesIO()
-        img.save(out, format="JPEG", quality=quality, optimize=True)
+        img.save(out, format="JPEG", quality=quality, optimize=False)
         return out.getvalue()
