@@ -1,0 +1,22 @@
+# Codex CLI Project Configuration (loaded for trusted projects)
+# Docs: https://learn.chatgpt.com/docs/models & https://developers.openai.com/plugins/build/plugins
+
+model = "gpt-6.2-astra"
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+
+[profiles.astra]
+model = "gpt-6.2-astra"
+model_reasoning_effort = "high"
+
+[profiles.astra_deep]
+model = "gpt-6.2-astra"
+model_reasoning_effort = "xhigh"
+
+[profiles.sol]
+model = "gpt-6.2-sol"
+model_reasoning_effort = "medium"
+
+[plugins."repo-harness-guard@local-repo"]
+enabled = true

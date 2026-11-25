@@ -10,9 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+_IS_FROZEN = getattr(sys, "frozen", False)
+_EXE_DIR = Path(sys.executable).resolve().parent if _IS_FROZEN else Path(__file__).resolve().parent.parent
+_BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+
 DEFAULT_INFERENCE_API_URL = "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict"
-DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "sessions"
-DEFAULT_MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+DEFAULT_DATA_DIR = _EXE_DIR / "data" / "sessions"
+DEFAULT_MODELS_DIR = _EXE_DIR / "models"
 
 
 

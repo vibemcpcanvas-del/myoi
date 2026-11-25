@@ -46,8 +46,12 @@ from src.session_manager import SessionManager, get_session_manager
 from src.yolo_exporter import validate_and_build_yolo_dataset
 
 
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-PID_FILE = Path(__file__).resolve().parent.parent / ".server.pid"
+_IS_FROZEN = getattr(sys, "frozen", False)
+_EXE_DIR = Path(sys.executable).resolve().parent if _IS_FROZEN else Path(__file__).resolve().parent.parent
+_BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+
+STATIC_DIR = _BUNDLE_DIR / "static"
+PID_FILE = _EXE_DIR / ".server.pid"
 
 
 @asynccontextmanager
