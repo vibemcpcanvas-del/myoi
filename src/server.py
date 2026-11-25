@@ -41,6 +41,7 @@ from src.aspects.telemetry import (
 from src.capture import CaptureService, get_capture_service, WindowFinder, CaptureState
 from src.config import AppConfig, get_config
 from src.multipart_parser import parse_multipart_body
+from src.onnx_detector import get_onnx_detector
 from src.session_manager import SessionManager, get_session_manager
 from src.yolo_exporter import validate_and_build_yolo_dataset
 
@@ -117,6 +118,7 @@ async def get_system_status() -> Dict[str, Any]:
         "circuitBreaker": default_inference_circuit_breaker.get_telemetry(),
         "telemetry": default_telemetry_collector.get_metrics(),
         "capture": get_capture_service(mock_mode=config.mock_inference).get_status(),
+        "onnx": get_onnx_detector(models_dir=config.models_dir).get_status(),
     }
 
 
@@ -234,6 +236,9 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
     is_mock: bool = config.mock_inference
     conf: Optional[float] = None
     iou: Optional[float] = None
+    use_cloud: bool = True
+    use_onnx: bool = False
+    onnx_model: Optional[str] = None
 
     # 1. Parse request body
     body_bytes = await request.body()
@@ -291,6 +296,15 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
 
         if "mock" in form_data.fields:
             is_mock = form_data.fields["mock"].lower() in ("1", "true", "yes")
+
+        if "useCloud" in form_data.fields:
+            use_cloud = form_data.fields["useCloud"].lower() in ("1", "true", "yes")
+
+        if "useOnnx" in form_data.fields:
+            use_onnx = form_data.fields["useOnnx"].lower() in ("1", "true", "yes")
+
+        if "onnxModel" in form_data.fields and form_data.fields["onnxModel"].strip():
+            onnx_model = form_data.fields["onnxModel"].strip()
     elif content_type_header.startswith("image/"):
         file_bytes = body_bytes
         file_mime = content_type_header
@@ -313,7 +327,22 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
             detail={"error": "invalid_mime_type", "message": f"Expected image file, received: '{file_mime}' ({filename})."},
         )
 
-    # 2. Mock mode handling
+    # 2. Both engines OFF -> standby passthrough (no cloud call, no local inference)
+    if not use_cloud and not use_onnx:
+        return {
+            "success": True,
+            "coordinateSpace": coordinate_space,
+            "inferenceWidth": imgsz,
+            "inferenceHeight": imgsz,
+            "results": [],
+            "metadata": {
+                "cloudEnabled": False,
+                "onnxEnabled": False,
+                "mode": "standby_both_off",
+            },
+        }
+
+    # 3. Mock mode handling
     if is_mock:
         return {
             "success": True,
@@ -335,11 +364,11 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
                     "box": {"x1": 320.0, "y1": 150.0, "x2": 480.0, "y2": 390.0},
                 },
             ],
-            "metadata": {"mock": True},
+            "metadata": {"mock": True, "cloudEnabled": use_cloud, "onnxEnabled": use_onnx},
         }
 
-    # 3. Check server-side credential configuration
-    if not config.is_api_key_configured:
+    # 4. Validate prerequisites for active engines
+    if use_cloud and not config.is_api_key_configured:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
@@ -351,39 +380,104 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
             },
         )
 
-    # 4. Proxy request to upstream cloud inference API
-    upstream_data = await _execute_upstream_inference(
-        config=config,
-        filename=filename,
-        file_bytes=file_bytes,
-        file_mime=file_mime,
-        imgsz=imgsz,
-        conf=conf,
-        iou=iou,
-    )
+    onnx_detector = get_onnx_detector(models_dir=config.models_dir) if use_onnx else None
+    if use_onnx and onnx_detector is not None:
+        if not onnx_detector.is_available:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": "onnxruntime_not_installed",
+                    "message": "onnxruntime이 설치되어 있지 않아 로컬 ONNX 추론을 실행할 수 없습니다.",
+                },
+            )
+        if onnx_model and onnx_detector.active_model_name != onnx_model:
+            try:
+                onnx_detector.load_model(onnx_model)
+            except (ValueError, FileNotFoundError) as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error": "onnx_model_load_failed", "message": str(e)},
+                )
+        if not onnx_detector.is_loaded:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": "onnx_model_not_loaded",
+                    "message": "로컬 ONNX 가중치(.onnx) 모델이 선택되지 않았습니다. models 폴더에 파일을 추가하거나 선택하세요.",
+                },
+            )
 
-    # 5. Normalize results schema
-    raw_results = []
-    if "images" in upstream_data and len(upstream_data["images"]) > 0:
-        first_img = upstream_data["images"][0]
-        raw_results = first_img.get("results", [])
-    elif "results" in upstream_data:
-        raw_results = upstream_data.get("results", [])
+    # 5. Execute active inference engines (Cloud / Local ONNX / Hybrid)
+    async def _run_cloud() -> Dict[str, Any]:
+        return await _execute_upstream_inference(
+            config=config,
+            filename=filename,
+            file_bytes=file_bytes,
+            file_mime=file_mime,
+            imgsz=imgsz,
+            conf=conf,
+            iou=iou,
+        )
 
+    async def _run_onnx() -> Dict[str, Any]:
+        assert onnx_detector is not None
+        return await asyncio.to_thread(
+            onnx_detector.predict,
+            image_bytes=file_bytes,
+            conf=conf if conf is not None else 0.25,
+            iou=iou if iou is not None else 0.45,
+            imgsz=imgsz,
+        )
+
+    upstream_data: Dict[str, Any] = {}
+    onnx_data: Dict[str, Any] = {}
+    if use_cloud and use_onnx:
+        upstream_data, onnx_data = await asyncio.gather(_run_cloud(), _run_onnx())
+    elif use_cloud:
+        upstream_data = await _run_cloud()
+    elif use_onnx:
+        onnx_data = await _run_onnx()
+
+    # 6. Normalize and merge results
     standardized_results: List[Dict[str, Any]] = []
-    for item in raw_results:
-        box = item.get("box", {})
-        standardized_results.append({
-            "class": int(item.get("class", 0)),
-            "name": str(item.get("name", f"Class_{item.get('class', 0)}")),
-            "confidence": float(item.get("confidence", 0.0)),
-            "box": {
-                "x1": float(box.get("x1", 0.0)),
-                "y1": float(box.get("y1", 0.0)),
-                "x2": float(box.get("x2", 0.0)),
-                "y2": float(box.get("y2", 0.0)),
-            },
-        })
+    if use_cloud:
+        raw_results = []
+        if "images" in upstream_data and len(upstream_data["images"]) > 0:
+            first_img = upstream_data["images"][0]
+            raw_results = first_img.get("results", [])
+        elif "results" in upstream_data:
+            raw_results = upstream_data.get("results", [])
+
+        for item in raw_results:
+            box = item.get("box", {})
+            standardized_results.append({
+                "class": int(item.get("class", 0)),
+                "name": str(item.get("name", f"Class_{item.get('class', 0)}")),
+                "confidence": float(item.get("confidence", 0.0)),
+                "box": {
+                    "x1": float(box.get("x1", 0.0)),
+                    "y1": float(box.get("y1", 0.0)),
+                    "x2": float(box.get("x2", 0.0)),
+                    "y2": float(box.get("y2", 0.0)),
+                },
+                "source": "cloud",
+            })
+
+    if use_onnx:
+        for item in onnx_data.get("results", []):
+            box = item.get("box", {})
+            standardized_results.append({
+                "class": int(item.get("class", 0)),
+                "name": str(item.get("name", f"C{item.get('class', 0)}")),
+                "confidence": float(item.get("confidence", 0.0)),
+                "box": {
+                    "x1": float(box.get("x1", 0.0)),
+                    "y1": float(box.get("y1", 0.0)),
+                    "x2": float(box.get("x2", 0.0)),
+                    "y2": float(box.get("y2", 0.0)),
+                },
+                "source": "onnx_local",
+            })
 
     return {
         "success": True,
@@ -392,7 +486,11 @@ async def predict_proxy(request: Request) -> Dict[str, Any]:
         "inferenceHeight": imgsz,
         "results": standardized_results,
         "metadata": {
-            "upstreamTask": upstream_data.get("metadata", {}).get("task", "detect"),
+            "cloudEnabled": use_cloud,
+            "onnxEnabled": use_onnx,
+            "onnxModel": onnx_detector.active_model_name if onnx_detector else None,
+            "onnxSpeed": onnx_data.get("speed") if use_onnx else None,
+            "upstreamTask": upstream_data.get("metadata", {}).get("task", "detect") if use_cloud else "onnx_local",
         },
     }
 
@@ -868,6 +966,88 @@ async def websocket_stream_endpoint(websocket: WebSocket):
             pass
         capture_svc.unregister_async_queue(queue)
 
+
+
+# ============================================================================
+# Local ONNX Model Management Endpoints
+# ============================================================================
+
+@app.get("/api/models/onnx")
+@measure_telemetry(metric_name="api_list_onnx_models")
+async def list_onnx_models_endpoint() -> Dict[str, Any]:
+    """Lists available local .onnx weights in models/ directory."""
+    cfg = get_config()
+    detector = get_onnx_detector(models_dir=cfg.models_dir)
+    return {"success": True, **detector.get_status()}
+
+
+@app.post("/api/models/onnx/load")
+@measure_telemetry(metric_name="api_load_onnx_model")
+async def load_onnx_model_endpoint(request: Request) -> Dict[str, Any]:
+    """Loads a specified .onnx weight file into memory for local inference."""
+    cfg = get_config()
+    detector = get_onnx_detector(models_dir=cfg.models_dir)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_json_body", "message": "Expected JSON payload with modelName."},
+        )
+
+    model_name = body.get("modelName")
+    if not model_name:
+        return detector.unload_model()
+
+    try:
+        return detector.load_model(str(model_name))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"error": "invalid_model_name", "message": str(e)})
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error": "model_not_found", "message": str(e)})
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={"error": "onnx_unavailable", "message": str(e)})
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail={"error": "onnx_load_error", "message": str(e)})
+
+
+@app.post("/api/models/onnx/unload")
+@measure_telemetry(metric_name="api_unload_onnx_model")
+async def unload_onnx_model_endpoint() -> Dict[str, Any]:
+    """Unloads the currently active local ONNX model."""
+    cfg = get_config()
+    detector = get_onnx_detector(models_dir=cfg.models_dir)
+    return detector.unload_model()
+
+
+@app.post("/api/models/onnx/upload")
+@measure_telemetry(metric_name="api_upload_onnx_model")
+async def upload_onnx_model_endpoint(request: Request) -> Dict[str, Any]:
+    """Uploads a .onnx weight file into models/ and loads it."""
+    cfg = get_config()
+    detector = get_onnx_detector(models_dir=cfg.models_dir)
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type.lower():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_content_type", "message": "Expected multipart/form-data with 'file' field."},
+        )
+    body_bytes = await request.body()
+    form_data = parse_multipart_body(body_bytes, content_type)
+    if "file" not in form_data.files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "missing_file_field", "message": "No 'file' field found in multipart payload."},
+        )
+    filename, file_bytes, _ = form_data.files["file"]
+    try:
+        return detector.save_uploaded_model(filename, file_bytes)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"error": "invalid_onnx_file", "message": str(e)})
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={"error": "onnx_unavailable", "message": str(e)})
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail={"error": "onnx_upload_failed", "message": str(e)})
 
 
 if STATIC_DIR.exists():

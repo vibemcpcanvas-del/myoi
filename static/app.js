@@ -58,6 +58,10 @@
         isConnectingWebRtc: false,
         webrtcReady: false,
         isDecodingFrame: false,
+        // Dual Inference Engine Toggles (Cloud API vs Local ONNX)
+        useCloud: localStorage.getItem('schale_use_cloud') !== 'false',
+        useOnnx: localStorage.getItem('schale_use_onnx') === 'true',
+        onnxModel: localStorage.getItem('schale_onnx_model') || '',
         // Bounded collection data proxy
         get collectedData() {
             return (window.Reviewer && window.Reviewer.records) ? window.Reviewer.records : [];
@@ -1092,6 +1096,9 @@
     };
 
     const stopOps = () => {
+        if (window.Reviewer && typeof window.Reviewer.flushUnsavedRecordsOnExit === 'function') {
+            window.Reviewer.flushUnsavedRecordsOnExit();
+        }
         state.wgcSessionGen = (state.wgcSessionGen || 0) + 1;
         state.isRunning = false;
         state.isInferenceInFlight = false;
@@ -1243,6 +1250,20 @@
             return;
         }
 
+        // 0. Check if both inference engines are disabled
+        if (!state.useCloud && !state.useOnnx) {
+            $('statusTxt').innerHTML = '<span class="text-slate-500 font-bold">⏸️ 추론 엔진 꺼짐 (클라우드 OFF · 로컬 ONNX OFF — 모니터링 대기)</span>';
+            const cvs = $('cvs');
+            if (cvs && typeof cvs.getContext === 'function') {
+                const ctx = cvs.getContext('2d');
+                if (ctx) ctx.clearRect(0, 0, cvs.width, cvs.height);
+            }
+            if (state.isRunning) {
+                state.timer = setTimeout(loop, 350);
+            }
+            return;
+        }
+
         const source = getFrameSource();
         if (!source || !source.width || !source.height) {
             $('statusTxt').innerHTML = '<span class="text-amber-600">🟡 프레임 소스 준비 대기 중...</span>';
@@ -1280,6 +1301,14 @@
         fd.append("file", blob, "frame.jpg");
         fd.append("imgsz", NET_SIZE);
         fd.append("coordinateSpace", "letterbox_640");
+        fd.append("useCloud", state.useCloud ? "true" : "false");
+        fd.append("useOnnx", state.useOnnx ? "true" : "false");
+        if (state.useOnnx && state.onnxModel) {
+            fd.append("onnxModel", state.onnxModel);
+        }
+        if ($('iConf')) {
+            fd.append("conf", $('iConf').value);
+        }
 
         state.abortController = new AbortController();
         const st = Date.now();
@@ -1580,10 +1609,11 @@
             };
 
             window.Reviewer.addRecord(record);
-            if (window.Reviewer && typeof window.Reviewer.scheduleAutoSave === 'function') {
-                window.Reviewer.scheduleAutoSave();
+            if (window.Reviewer && typeof window.Reviewer.saveCurrentSessionToServer === 'function') {
+                // Persist immediately to local disk so files survive sudden session close
+                window.Reviewer.saveCurrentSessionToServer(true);
             }
-            toast(`스냅샷 수집 완료 (${vw}x${vh})`);
+            toast(`스냅샷 수집 및 로컬 보존 완료 (${vw}x${vh})`);
         } catch (err) {
             state.errorCount++;
             const errBox = $('cntError');
@@ -1772,6 +1802,143 @@
         }
     };
 
+    // --- Dual Inference Engine Controls (Cloud & Local ONNX) ---
+    function updateInferenceEngineBadge() {
+        const badge = $('inferenceEngineBadge');
+        if (!badge) return;
+        if (state.useCloud && state.useOnnx) {
+            badge.className = 'text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300';
+            badge.innerText = '⚡ 하이브리드 (Cloud + ONNX)';
+        } else if (state.useCloud) {
+            badge.className = 'text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-sky-100 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300';
+            badge.innerText = '☁️ 클라우드 단독';
+        } else if (state.useOnnx) {
+            badge.className = 'text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300';
+            badge.innerText = '🧠 로컬 ONNX 단독';
+        } else {
+            badge.className = 'text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400';
+            badge.innerText = '⏸️ 추론 모두 꺼짐';
+        }
+    }
+
+    async function refreshOnnxModels() {
+        const sel = $('selOnnxModel');
+        const txtStatus = $('txtOnnxStatus');
+        if (!sel) return;
+        try {
+            const res = await fetch('/api/models/onnx');
+            if (!res.ok) return;
+            const data = await res.json();
+            const models = data.models || [];
+            const active = data.activeModel || state.onnxModel || '';
+
+            sel.innerHTML = '<option value="">-- .onnx 가중치 선택 (models/) --</option>';
+            models.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m.name;
+                opt.textContent = `${m.name} (${m.sizeMb} MB)`;
+                sel.appendChild(opt);
+            });
+
+            if (active && models.some(m => m.name === active)) {
+                sel.value = active;
+                state.onnxModel = active;
+                if (txtStatus) txtStatus.innerText = data.loaded ? `로드됨 (${active})` : `선택됨 (${active})`;
+            } else {
+                if (txtStatus) txtStatus.innerText = models.length === 0 ? '파일 없음' : '미선택';
+            }
+        } catch (err) {
+            console.warn('[ONNX] Failed to list models:', err);
+        }
+    }
+
+    async function loadSelectedOnnxModel(modelName) {
+        const txtStatus = $('txtOnnxStatus');
+        state.onnxModel = modelName || '';
+        localStorage.setItem('schale_onnx_model', state.onnxModel);
+        try {
+            const res = await fetch('/api/models/onnx/load', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ modelName: modelName || null }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.detail?.message || `HTTP ${res.status}`);
+            }
+            if (data.loaded) {
+                if (txtStatus) txtStatus.innerText = `로드됨 (${data.activeModel})`;
+                toast(`로컬 ONNX 모델 로드 완료: ${data.activeModel}`);
+            } else {
+                if (txtStatus) txtStatus.innerText = '미선택';
+            }
+        } catch (err) {
+            if (txtStatus) txtStatus.innerText = '로드 실패';
+            toast(`ONNX 모델 로드 실패: ${err.message}`, true);
+        }
+    }
+
+    if ($('chkUseCloud')) {
+        $('chkUseCloud').checked = state.useCloud;
+        $('chkUseCloud').onchange = (e) => {
+            state.useCloud = !!e.target.checked;
+            localStorage.setItem('schale_use_cloud', String(state.useCloud));
+            updateInferenceEngineBadge();
+            toast(`클라우드 AI 호출: ${state.useCloud ? '켜짐 (ON)' : '꺼짐 (OFF)'}`);
+        };
+    }
+
+    if ($('chkUseOnnx')) {
+        $('chkUseOnnx').checked = state.useOnnx;
+        $('chkUseOnnx').onchange = async (e) => {
+            state.useOnnx = !!e.target.checked;
+            localStorage.setItem('schale_use_onnx', String(state.useOnnx));
+            updateInferenceEngineBadge();
+            toast(`로컬 ONNX 가중치 실행: ${state.useOnnx ? '켜짐 (ON)' : '꺼짐 (OFF)'}`);
+            if (state.useOnnx && state.onnxModel) {
+                await loadSelectedOnnxModel(state.onnxModel);
+            }
+        };
+    }
+
+    if ($('selOnnxModel')) {
+        $('selOnnxModel').onchange = (e) => loadSelectedOnnxModel(e.target.value);
+    }
+    if ($('btnRefreshOnnx')) {
+        $('btnRefreshOnnx').onclick = () => refreshOnnxModels();
+    }
+    if ($('inpOnnxUpload')) {
+        $('inpOnnxUpload').onchange = async (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (!file) return;
+            const fd = new FormData();
+            fd.append('file', file);
+            try {
+                toast(`ONNX 가중치 업로드 중: ${file.name}...`);
+                const res = await fetch('/api/models/onnx/upload', { method: 'POST', body: fd });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail?.message || `HTTP ${res.status}`);
+                state.onnxModel = data.activeModel;
+                localStorage.setItem('schale_onnx_model', state.onnxModel);
+                await refreshOnnxModels();
+                if ($('chkUseOnnx') && !state.useOnnx) {
+                    $('chkUseOnnx').checked = true;
+                    state.useOnnx = true;
+                    localStorage.setItem('schale_use_onnx', 'true');
+                    updateInferenceEngineBadge();
+                }
+                toast(`로컬 ONNX 업로드 및 활성화 완료: ${data.activeModel}`);
+            } catch (err) {
+                toast(`ONNX 업로드 실패: ${err.message}`, true);
+            } finally {
+                e.target.value = '';
+            }
+        };
+    }
+
+    updateInferenceEngineBadge();
+    refreshOnnxModels();
+
     // Initial render and page lifecycle cleanup
     renderCls();
     if (typeof setCaptureMode === 'function') {
@@ -1780,7 +1947,21 @@
     if (typeof refreshWgcWindows === 'function') {
         refreshWgcWindows();
     }
-    window.addEventListener('beforeunload', stopOps);
+    if (typeof window.addEventListener === 'function') {
+        window.addEventListener('pagehide', () => {
+            if (window.Reviewer && typeof window.Reviewer.flushUnsavedRecordsOnExit === 'function') {
+                window.Reviewer.flushUnsavedRecordsOnExit();
+            }
+        });
+        window.addEventListener('beforeunload', stopOps);
+    }
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden' && window.Reviewer && typeof window.Reviewer.flushUnsavedRecordsOnExit === 'function') {
+                window.Reviewer.flushUnsavedRecordsOnExit();
+            }
+        });
+    }
     document.body.onclick = () => {
         if (speechSynthesis.getVoices().length === 0) speechSynthesis.getVoices();
     };

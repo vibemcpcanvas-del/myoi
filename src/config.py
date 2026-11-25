@@ -12,6 +12,7 @@ from typing import Optional
 
 DEFAULT_INFERENCE_API_URL = "https://predict-6af9e8ecbe647c167e82ae7d-dproatj77a-du.a.run.app/predict"
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "sessions"
+DEFAULT_MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 
 
 
@@ -125,6 +126,7 @@ class AppConfig:
     request_timeout_sec: float = 30.0
     max_upload_size_bytes: int = 10 * 1024 * 1024  # 10 MB
     data_dir: Path = DEFAULT_DATA_DIR
+    models_dir: Path = DEFAULT_MODELS_DIR
 
     @property
     def is_api_key_configured(self) -> bool:
@@ -163,6 +165,14 @@ def get_config() -> AppConfig:
     )
     data_dir = Path(data_dir_env).resolve() if data_dir_env else DEFAULT_DATA_DIR
 
+    models_dir_env = (
+        os.getenv("SCHALE_MODELS_DIR")
+        or os.getenv("MODELS_DIR")
+        or dotenv_vars.get("SCHALE_MODELS_DIR")
+        or dotenv_vars.get("MODELS_DIR")
+    )
+    models_dir = Path(models_dir_env).resolve() if models_dir_env else DEFAULT_MODELS_DIR
+
     return AppConfig(
         host=host,
         port=port,
@@ -171,4 +181,5 @@ def get_config() -> AppConfig:
         mock_inference=mock_mode,
         request_timeout_sec=timeout,
         data_dir=data_dir,
+        models_dir=models_dir,
     )

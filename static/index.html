@@ -388,6 +388,36 @@
                     <input type="checkbox" id="chkTTS" checked><span class="chk"></span>TTS 음성 안내 켜기
                 </label>
             </div>
+
+            <!-- 추론 엔진 선택 (클라우드 / 로컬 ONNX 독립 제어) -->
+            <div class="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700 space-y-2">
+                <div class="flex justify-between items-center">
+                    <span class="font-black text-xs text-[var(--p)]">추론 엔진 선택</span>
+                    <span id="inferenceEngineBadge" class="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-sky-100 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300">☁️ 클라우드 단독</span>
+                </div>
+                <label class="ba-check cursor-pointer flex items-center justify-between text-xs font-bold text-gray-700 dark:text-gray-300">
+                    <span class="flex items-center"><input type="checkbox" id="chkUseCloud" checked><span class="chk"></span>☁️ 클라우드 AI 호출 켜기</span>
+                </label>
+                <label class="ba-check cursor-pointer flex items-center justify-between text-xs font-bold text-gray-700 dark:text-gray-300">
+                    <span class="flex items-center"><input type="checkbox" id="chkUseOnnx"><span class="chk"></span>🧠 로컬 ONNX 가중치 직접 실행</span>
+                </label>
+
+                <div id="onnxControlPanel" class="bg-gray-50 dark:bg-[#1e293b]/80 border border-gray-200 dark:border-gray-700 rounded p-2 space-y-1.5">
+                    <div class="flex items-center gap-1">
+                        <select id="selOnnxModel" class="flex-1 text-[11px] font-mono bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-600 rounded px-1.5 py-1 text-gray-800 dark:text-gray-200">
+                            <option value="">-- .onnx 가중치 선택 (models/) --</option>
+                        </select>
+                        <button id="btnRefreshOnnx" title="모델 목록 새로고침" class="px-2 py-1 text-xs font-bold bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded">🔄</button>
+                    </div>
+                    <div class="flex items-center justify-between gap-2">
+                        <label for="inpOnnxUpload" class="flex-1 text-center cursor-pointer text-[11px] font-bold py-1 px-2 rounded bg-sky-50 dark:bg-sky-950/50 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800 hover:bg-sky-100 dark:hover:bg-sky-900/60">
+                            📂 .onnx 가중치 파일 추가
+                        </label>
+                        <input type="file" id="inpOnnxUpload" accept=".onnx" class="hidden">
+                        <span id="txtOnnxStatus" class="text-[10px] font-mono text-gray-500 dark:text-gray-400">미선택</span>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- 데이터 수집 및 검수 센터 -->

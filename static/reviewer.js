@@ -1126,14 +1126,64 @@
             }
         }
 
-        scheduleAutoSave() {
+        scheduleAutoSave(delayMs = 250) {
             if (typeof window === 'undefined' || !window.fetch) return;
             if (this.autoSaveTimer) {
                 clearTimeout(this.autoSaveTimer);
             }
             this.autoSaveTimer = setTimeout(() => {
+                this.autoSaveTimer = null;
                 this.saveCurrentSessionToServer(true);
-            }, 1000);
+            }, delayMs);
+        }
+
+        flushUnsavedRecordsOnExit() {
+            if (typeof window === 'undefined') return;
+            if (this.autoSaveTimer) {
+                clearTimeout(this.autoSaveTimer);
+                this.autoSaveTimer = null;
+            }
+            const sessId = this.currentSessionId || (window.AppState ? window.AppState.sessionId : 'SES_DEFAULT');
+            const evicted = (this.unpersistedEvicted || []).slice();
+            const current = (this.records || []).slice();
+            const dirtyRecords = [...evicted, ...current].filter(r => !r._savedOnServer || r._dirtyAnnotation);
+            if (dirtyRecords.length === 0) return;
+
+            const payloadRecords = dirtyRecords.map(r => {
+                const copy = Object.assign({}, r);
+                if (r._savedOnServer && r.imageFile) {
+                    delete copy.origBase64;
+                    delete copy.prevBase64;
+                }
+                delete copy.origBlob;
+                delete copy.prevBlob;
+                delete copy._savedOnServer;
+                delete copy._dirtyAnnotation;
+                return copy;
+            });
+
+            const jsonStr = JSON.stringify({
+                sessionId: sessId,
+                records: payloadRecords,
+                classes: (window.AppState && window.AppState.cls) ? window.AppState.cls : {},
+            });
+
+            // Use keepalive fetch (and fallback to sendBeacon if small enough) so browser preserves local data on tab close
+            try {
+                if (typeof fetch === 'function') {
+                    fetch('/api/sessions/save', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: jsonStr,
+                        keepalive: true,
+                    }).catch(() => {});
+                } else if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+                    const blob = new Blob([jsonStr], { type: 'application/json' });
+                    navigator.sendBeacon('/api/sessions/save', blob);
+                }
+            } catch (_) {
+                // Ignore unload transport errors
+            }
         }
 
         openSessionModal() {
