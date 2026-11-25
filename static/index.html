@@ -371,6 +371,10 @@
                     <input type="range" id="iConf" min="0.01" max="1.0" step="0.01" value="0.25">
                 </div>
                 <div>
+                    <div class="flex justify-between font-bold text-xs mb-1"><span>IoU 임계치 (NMS)</span><span id="vIou" class="text-[var(--p)] font-mono">0.45</span></div>
+                    <input type="range" id="iIou" min="0.0" max="0.95" step="0.05" value="0.45">
+                </div>
+                <div>
                     <div class="flex justify-between font-bold text-xs mb-1"><span>연속 감지 프레임</span><span id="vFrame" class="text-[var(--p)] font-mono">2</span></div>
                     <input type="range" id="iFrame" min="1" max="5" step="1" value="2">
                 </div>

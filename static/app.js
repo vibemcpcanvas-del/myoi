@@ -270,6 +270,7 @@
 
     // --- UI Event Bindings ---
     $('iConf').oninput = e => $('vConf').innerText = Number(e.target.value).toFixed(2);
+    if ($('iIou')) $('iIou').oninput = e => { if ($('vIou')) $('vIou').innerText = Number(e.target.value).toFixed(2); };
     $('iFrame').oninput = e => $('vFrame').innerText = e.target.value;
     $('iCooldown').oninput = e => $('vCooldown').innerText = Number(e.target.value).toFixed(1) + 's';
     // --- WebSocket Circuit Breaker (Zero-Console-Flood Invariant) ---
@@ -1308,6 +1309,9 @@
         }
         if ($('iConf')) {
             fd.append("conf", $('iConf').value);
+        }
+        if ($('iIou')) {
+            fd.append("iou", $('iIou').value);
         }
 
         state.abortController = new AbortController();
