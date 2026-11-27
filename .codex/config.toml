@@ -2,28 +2,9 @@
 # Docs: https://learn.chatgpt.com/docs/models & https://developers.openai.com/plugins/build/plugins
 
 model = "gpt-6-luna"
-model_provider = "pateway_myoi"
 model_reasoning_effort = "max"
-model_context_window = 1048576
-model_auto_compact_token_limit = 900000
 sandbox_mode = "workspace-write"
 approval_policy = "on-request"
-
-[model_providers.pateway_myoi]
-name = "Pateway (myoi scoped)"
-base_url = "https://api.pateway.ai/v1"
-wire_api = "responses"
-requires_openai_auth = false
-supports_websockets = false
-
-[model_providers.pateway_myoi.auth]
-command = "powershell"
-args = ["-NoProfile", "-Command", "$env:MYOI_PATEWAY_API_KEY"]
-
-[profiles.luna_max]
-model = "gpt-6-luna"
-model_provider = "pateway_myoi"
-model_reasoning_effort = "max"
 
 [plugins."repo-harness-guard@local-repo"]
 enabled = true
